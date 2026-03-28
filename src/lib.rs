@@ -28,7 +28,10 @@ pub fn list_files_with_ignore(
     Ok(files)
 }
 
-fn get_duplicated_files_by_byte(paths: Vec<PathBuf>) -> Vec<Vec<PathBuf>> {
+fn get_duplicated_files_by_byte(
+    paths: Vec<PathBuf>,
+    on_progress: &mut dyn FnMut(),
+) -> Vec<Vec<PathBuf>> {
     const BUF_SIZE: usize = 1 << 12;
 
     let mut buf = [0; BUF_SIZE];
@@ -53,6 +56,7 @@ fn get_duplicated_files_by_byte(paths: Vec<PathBuf>) -> Vec<Vec<PathBuf>> {
         };
         files.push(buf.clone());
         valid_paths.push(path.clone());
+        on_progress();
     }
 
     let mut is_duplicated = vec![false; files.len()];
@@ -79,7 +83,10 @@ fn get_duplicated_files_by_byte(paths: Vec<PathBuf>) -> Vec<Vec<PathBuf>> {
     duplicated_files
 }
 
-pub fn get_duplicated_files(paths: Vec<PathBuf>) -> io::Result<Vec<Vec<PathBuf>>> {
+pub fn get_duplicated_files(
+    paths: Vec<PathBuf>,
+    mut on_progress: impl FnMut(),
+) -> io::Result<Vec<Vec<PathBuf>>> {
     let mut map_by_len: HashMap<u64, Vec<PathBuf>> = HashMap::new();
     for path in paths {
         let len = path.metadata()?.len();
@@ -92,14 +99,18 @@ pub fn get_duplicated_files(paths: Vec<PathBuf>) -> io::Result<Vec<Vec<PathBuf>>
             continue;
         }
 
-        duplicated_files.extend(get_duplicated_files_by_byte(paths));
+        duplicated_files.extend(get_duplicated_files_by_byte(paths, &mut on_progress));
     }
 
     Ok(duplicated_files)
 }
 
 fn sort_paths<'a>(p1: &'a PathBuf, p2: &'a PathBuf) -> (&'a PathBuf, &'a PathBuf) {
-    if p1 < p2 { (p1, p2) } else { (p2, p1) }
+    if p1 < p2 {
+        (p1, p2)
+    } else {
+        (p2, p1)
+    }
 }
 
 pub fn get_shared_parents(

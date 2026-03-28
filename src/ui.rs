@@ -10,6 +10,7 @@ const DEFAULT_IGNORE: &[&str] = &[".git", "node_modules", "__pycache__", ".DS_St
 
 enum ScanMessage {
     Status(String),
+    Progress(f32),
     Done(Result<(DirectoryNode, usize), String>),
 }
 
@@ -20,6 +21,7 @@ pub struct FindDuplicatesApp {
     patterns: Vec<String>,
     new_pattern: String,
     scan_rx: Option<mpsc::Receiver<ScanMessage>>,
+    progress: Option<f32>,
     ctx: egui::Context,
 }
 
@@ -32,6 +34,7 @@ impl FindDuplicatesApp {
             patterns: DEFAULT_IGNORE.iter().map(|s| s.to_string()).collect(),
             new_pattern: String::new(),
             scan_rx: None,
+            progress: None,
             ctx,
         }
     }
@@ -44,8 +47,10 @@ impl eframe::App for FindDuplicatesApp {
             for msg in messages {
                 match msg {
                     ScanMessage::Status(s) => self.status = s,
+                    ScanMessage::Progress(p) => self.progress = Some(p),
                     ScanMessage::Done(result) => {
                         self.scan_rx = None;
+                        self.progress = None;
                         match result {
                             Ok((tree, count)) => {
                                 if count == 0 {
@@ -96,6 +101,9 @@ impl eframe::App for FindDuplicatesApp {
         });
 
         ui.label(&self.status);
+        if let Some(p) = self.progress {
+            ui.add(egui::ProgressBar::new(p).show_percentage());
+        }
         ui.separator();
 
         egui::ScrollArea::vertical()
@@ -167,7 +175,27 @@ impl FindDuplicatesApp {
                     )));
                     ctx.request_repaint();
 
-                    match get_duplicated_files(paths) {
+                    let total_to_compare: usize = {
+                        let mut map: std::collections::HashMap<u64, usize> =
+                            std::collections::HashMap::new();
+                        for p in &paths {
+                            if let Ok(m) = p.metadata() {
+                                *map.entry(m.len()).or_default() += 1;
+                            }
+                        }
+                        map.into_values().filter(|&c| c > 1).sum()
+                    };
+                    let mut compared = 0usize;
+
+                    match get_duplicated_files(paths, || {
+                        compared += 1;
+                        if total_to_compare > 0 {
+                            let _ = tx.send(ScanMessage::Progress(
+                                compared as f32 / total_to_compare as f32,
+                            ));
+                            ctx.request_repaint();
+                        }
+                    }) {
                         Ok(duplicated_files) => {
                             let _ = tx.send(ScanMessage::Status("Building tree...".into()));
                             ctx.request_repaint();
