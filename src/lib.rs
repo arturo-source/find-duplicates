@@ -33,25 +33,40 @@ fn get_duplicated_files_by_byte(paths: Vec<PathBuf>) -> Vec<Vec<PathBuf>> {
 
     let mut buf = [0; BUF_SIZE];
     let mut files = Vec::new();
+    let mut valid_paths: Vec<PathBuf> = Vec::new();
     let mut duplicated_files = Vec::new();
-    let mut is_duplicated = vec![false; paths.len()];
 
     for path in &paths {
-        let mut file = File::open(path).unwrap();
-        file.read(&mut buf).unwrap();
+        let mut file = match File::open(path) {
+            Ok(f) => f,
+            Err(err) => {
+                eprintln!("Warning: Could not open file ({}): {:?}", err, path);
+                continue;
+            }
+        };
+        match file.read(&mut buf) {
+            Ok(_) => {}
+            Err(err) => {
+                eprintln!("Warning: Could not read file ({}): {:?}", err, path);
+                continue;
+            }
+        };
         files.push(buf.clone());
+        valid_paths.push(path.clone());
     }
+
+    let mut is_duplicated = vec![false; files.len()];
 
     for (i, f1) in files.iter().enumerate() {
         if is_duplicated[i] {
             continue;
         }
 
-        let mut equal_files = vec![paths[i].clone()];
+        let mut equal_files = vec![valid_paths[i].clone()];
         for (j, f2) in files.iter().enumerate().skip(i + 1) {
             if f1 == f2 {
                 is_duplicated[j] = true;
-                equal_files.push(paths[j].clone());
+                equal_files.push(valid_paths[j].clone());
             }
         }
 
