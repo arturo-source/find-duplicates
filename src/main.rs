@@ -1,45 +1,91 @@
-use clap::Parser;
 use deduplicator::{get_duplicated_files, get_shared_parents, list_files};
+use std::io;
 use std::path::PathBuf;
-use std::{io, process};
 
-/// Find all files duplicated inside of a path.
-#[derive(Parser)]
-struct Cli {
-    /// The path to the folder to read
-    path: PathBuf,
-}
-
-fn main() {
-    let args = Cli::parse();
-
-    if let Err(e) = run(args.path) {
-        println!("Application error: {e}");
-        process::exit(1);
-    }
-}
-
-fn run(path: PathBuf) -> io::Result<()> {
+fn run(path: PathBuf) -> io::Result<String> {
     let paths = list_files(path)?;
     let duplicated_files = get_duplicated_files(paths)?;
     let shared_parents = get_shared_parents(duplicated_files);
 
     let mut shared_parents_vec: Vec<_> = shared_parents.into_iter().collect();
-    shared_parents_vec.sort_by(|a, b| b.1.0.len().cmp(&a.1.0.len()));
+    shared_parents_vec.sort_by(|a, b| b.1 .0.len().cmp(&a.1 .0.len()));
 
+    let mut output = String::new();
     for ((parent1, parent2), (files1, files2)) in shared_parents_vec {
-        println!("In {parent1:?}:");
+        output.push_str(&format!("In {parent1:?}:\n"));
         for f in files1 {
-            println!("  {:?}", f.file_name().unwrap())
+            output.push_str(&format!("  {:?}\n", f.file_name().unwrap()));
         }
 
-        println!("In {parent2:?}:");
+        output.push_str(&format!("In {parent2:?}:\n"));
         for f in files2 {
-            println!("  {:?}", f.file_name().unwrap())
+            output.push_str(&format!("  {:?}\n", f.file_name().unwrap()));
         }
 
-        println!()
+        output.push('\n');
     }
 
-    Ok(())
+    Ok(output)
+}
+
+struct DeduplicatorApp {
+    result: String,
+    status: String,
+}
+
+impl Default for DeduplicatorApp {
+    fn default() -> Self {
+        Self {
+            result: String::new(),
+            status: "Select a folder to scan for duplicates".into(),
+        }
+    }
+}
+
+impl eframe::App for DeduplicatorApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        ui.heading("Deduplicator");
+        ui.separator();
+
+        if ui.button("Select Folder").clicked() {
+            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                match run(path) {
+                    Ok(output) => {
+                        if output.is_empty() {
+                            self.status = "No duplicates found.".into();
+                        } else {
+                            self.status = "Done.".into();
+                        }
+                        self.result = output;
+                    }
+                    Err(e) => {
+                        self.status = format!("Error: {e}");
+                    }
+                }
+            }
+        }
+
+        ui.label(&self.status);
+        ui.separator();
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+                ui.label(&self.result);
+            });
+    }
+}
+
+fn main() -> Result<(), eframe::Error> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([600.0, 400.0]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Deduplicator",
+        options,
+        Box::new(|_cc| Ok(Box::new(DeduplicatorApp::default()))),
+    )
 }
