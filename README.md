@@ -15,6 +15,10 @@ A desktop application to find duplicate files across directories. Built with Rus
 - Configurable ignore patterns
 - Tree view of duplicates grouped by folder
 
+## TODO
+
+- [ ] Optimize RAM usage for large file sets — currently loads all file paths and first 4KB of every file into memory. Use iterators/lazy evaluation instead.
+
 ## Build
 
 ```bash
