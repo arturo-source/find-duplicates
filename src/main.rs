@@ -9,6 +9,6 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "Find Duplicates",
         options,
-        Box::new(|_cc| Ok(Box::new(ui::FindDuplicatesApp::default()))),
+        Box::new(|cc| Ok(Box::new(ui::FindDuplicatesApp::new(cc.egui_ctx.clone())))),
     )
 }

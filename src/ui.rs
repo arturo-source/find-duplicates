@@ -1,10 +1,17 @@
 use find_duplicates::{
-    DirectoryNode, build_directory_tree, get_duplicated_files, list_files_with_ignore,
+    build_directory_tree, get_duplicated_files, list_files_with_ignore, DirectoryNode,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::thread;
 
 const DEFAULT_IGNORE: &[&str] = &[".git", "node_modules", "__pycache__", ".DS_Store"];
+
+enum ScanMessage {
+    Status(String),
+    Done(Result<(DirectoryNode, usize), String>),
+}
 
 pub struct FindDuplicatesApp {
     tree: Option<DirectoryNode>,
@@ -12,22 +19,48 @@ pub struct FindDuplicatesApp {
     status: String,
     patterns: Vec<String>,
     new_pattern: String,
+    scan_rx: Option<mpsc::Receiver<ScanMessage>>,
+    ctx: egui::Context,
 }
 
-impl Default for FindDuplicatesApp {
-    fn default() -> Self {
+impl FindDuplicatesApp {
+    pub fn new(ctx: egui::Context) -> Self {
         Self {
             tree: None,
             root: PathBuf::new(),
             status: "Select a folder to scan for duplicates".into(),
             patterns: DEFAULT_IGNORE.iter().map(|s| s.to_string()).collect(),
             new_pattern: String::new(),
+            scan_rx: None,
+            ctx,
         }
     }
 }
 
 impl eframe::App for FindDuplicatesApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if let Some(ref rx) = self.scan_rx {
+            let messages: Vec<_> = rx.try_iter().collect();
+            for msg in messages {
+                match msg {
+                    ScanMessage::Status(s) => self.status = s,
+                    ScanMessage::Done(result) => {
+                        self.scan_rx = None;
+                        match result {
+                            Ok((tree, count)) => {
+                                if count == 0 {
+                                    self.status = "No duplicates found.".into();
+                                } else {
+                                    self.status = format!("Found {count} duplicates.");
+                                }
+                                self.tree = Some(tree);
+                            }
+                            Err(e) => self.status = format!("Error: {e}"),
+                        }
+                    }
+                }
+            }
+        }
         ui.collapsing("Ignore Patterns", |ui| {
             let mut remove_idx = None;
             for (i, pattern) in self.patterns.iter().enumerate() {
@@ -53,11 +86,14 @@ impl eframe::App for FindDuplicatesApp {
 
         ui.separator();
 
-        if ui.button("Select Folder").clicked() {
-            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                self.scan(path);
+        let scanning = self.scan_rx.is_some();
+        ui.add_enabled_ui(!scanning, |ui| {
+            if ui.button("Select Folder").clicked() {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    self.scan(path);
+                }
             }
-        }
+        });
 
         ui.label(&self.status);
         ui.separator();
@@ -111,21 +147,47 @@ impl FindDuplicatesApp {
     fn scan(&mut self, path: PathBuf) {
         self.tree = None;
         self.root = path.clone();
+        self.status = "Scanning...".into();
+
+        let (tx, rx) = mpsc::channel();
+        self.scan_rx = Some(rx);
+
         let ignore_set: HashSet<String> = self.patterns.iter().cloned().collect();
-        match list_files_with_ignore(path.clone(), &ignore_set) {
-            Ok(paths) => match get_duplicated_files(paths) {
-                Ok(duplicated_files) => {
-                    let tree = build_directory_tree(&path, duplicated_files);
-                    if tree.total_count() == 0 {
-                        self.status = "No duplicates found.".into();
-                    } else {
-                        self.status = format!("Found {} duplicates.", tree.total_count());
+        let ctx = self.ctx.clone();
+
+        thread::spawn(move || {
+            let _ = tx.send(ScanMessage::Status("Listing files...".into()));
+            ctx.request_repaint();
+
+            match list_files_with_ignore(path.clone(), &ignore_set) {
+                Ok(paths) => {
+                    let file_count = paths.len();
+                    let _ = tx.send(ScanMessage::Status(format!(
+                        "Found {file_count} files. Searching for duplicates..."
+                    )));
+                    ctx.request_repaint();
+
+                    match get_duplicated_files(paths) {
+                        Ok(duplicated_files) => {
+                            let _ = tx.send(ScanMessage::Status("Building tree...".into()));
+                            ctx.request_repaint();
+
+                            let tree = build_directory_tree(&path, duplicated_files);
+                            let count = tree.total_count();
+                            let _ = tx.send(ScanMessage::Done(Ok((tree, count))));
+                            ctx.request_repaint();
+                        }
+                        Err(e) => {
+                            let _ = tx.send(ScanMessage::Done(Err(e.to_string())));
+                            ctx.request_repaint();
+                        }
                     }
-                    self.tree = Some(tree);
                 }
-                Err(e) => self.status = format!("Error: {e}"),
-            },
-            Err(e) => self.status = format!("Error: {e}"),
-        }
+                Err(e) => {
+                    let _ = tx.send(ScanMessage::Done(Err(e.to_string())));
+                    ctx.request_repaint();
+                }
+            }
+        });
     }
 }
