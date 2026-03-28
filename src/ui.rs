@@ -27,9 +27,6 @@ impl Default for FindDuplicatesApp {
 
 impl eframe::App for FindDuplicatesApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        ui.heading("Find Duplicates");
-        ui.separator();
-
         ui.collapsing("Ignore Patterns", |ui| {
             let mut remove_idx = None;
             for (i, pattern) in self.patterns.iter().enumerate() {
