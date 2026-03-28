@@ -1,30 +1,29 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Read};
 use std::path::PathBuf;
+use walkdir::WalkDir;
 
 pub fn list_files(path: PathBuf) -> io::Result<Vec<PathBuf>> {
-    list_files_with_ignore(path, &[])
+    list_files_with_ignore(path, &HashSet::new())
 }
 
-pub fn list_files_with_ignore(path: PathBuf, ignore: &[String]) -> io::Result<Vec<PathBuf>> {
-    if path.is_file() {
-        return Ok(vec![path]);
-    }
-
-    let mut files = Vec::new();
-    let entries = fs::read_dir(path)?;
-    for entry in entries {
-        let entry_path = entry?.path();
-        if let Some(name) = entry_path.file_name() {
-            let name_str = name.to_string_lossy();
-            if ignore.iter().any(|p| name_str == p.as_str()) {
-                continue;
+pub fn list_files_with_ignore(
+    path: PathBuf,
+    ignore_set: &HashSet<String>,
+) -> io::Result<Vec<PathBuf>> {
+    let files: Vec<PathBuf> = WalkDir::new(&path)
+        .into_iter()
+        .filter_entry(|e| {
+            if let Some(name) = e.file_name().to_str() {
+                return !ignore_set.contains(name);
             }
-        }
-        let nested_files = list_files_with_ignore(entry_path, ignore)?;
-        files.extend(nested_files);
-    }
+            true
+        })
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.path().to_path_buf())
+        .collect();
 
     Ok(files)
 }
@@ -85,11 +84,7 @@ pub fn get_duplicated_files(paths: Vec<PathBuf>) -> io::Result<Vec<Vec<PathBuf>>
 }
 
 fn sort_paths<'a>(p1: &'a PathBuf, p2: &'a PathBuf) -> (&'a PathBuf, &'a PathBuf) {
-    if p1 < p2 {
-        (p1, p2)
-    } else {
-        (p2, p1)
-    }
+    if p1 < p2 { (p1, p2) } else { (p2, p1) }
 }
 
 pub fn get_shared_parents(

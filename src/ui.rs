@@ -1,6 +1,7 @@
 use find_duplicates::{
-    build_directory_tree, get_duplicated_files, list_files_with_ignore, DirectoryNode,
+    DirectoryNode, build_directory_tree, get_duplicated_files, list_files_with_ignore,
 };
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 const DEFAULT_IGNORE: &[&str] = &[".git", "node_modules", "__pycache__", ".DS_Store"];
@@ -110,7 +111,8 @@ impl FindDuplicatesApp {
     fn scan(&mut self, path: PathBuf) {
         self.tree = None;
         self.root = path.clone();
-        match list_files_with_ignore(path.clone(), &self.patterns) {
+        let ignore_set: HashSet<String> = self.patterns.iter().cloned().collect();
+        match list_files_with_ignore(path.clone(), &ignore_set) {
             Ok(paths) => match get_duplicated_files(paths) {
                 Ok(duplicated_files) => {
                     let tree = build_directory_tree(&path, duplicated_files);
