@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::PathBuf;
@@ -133,4 +133,83 @@ pub fn format_duplicates(path: PathBuf) -> io::Result<String> {
     }
 
     Ok(output)
+}
+
+pub struct DirectoryNode {
+    pub path: PathBuf,
+    pub files: Vec<PathBuf>,
+    pub children: Vec<DirectoryNode>,
+}
+
+impl DirectoryNode {
+    pub fn total_count(&self) -> usize {
+        self.files.len() + self.children.iter().map(|c| c.total_count()).sum::<usize>()
+    }
+}
+
+pub fn build_directory_tree(root: &PathBuf, duplicated_files: Vec<Vec<PathBuf>>) -> DirectoryNode {
+    let mut files_by_dir: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    for group in &duplicated_files {
+        for file in group {
+            if let Some(parent) = file.parent() {
+                files_by_dir
+                    .entry(parent.to_path_buf())
+                    .or_default()
+                    .push(file.clone());
+            }
+        }
+    }
+
+    fn build_node(
+        path: &PathBuf,
+        files_by_dir: &HashMap<PathBuf, Vec<PathBuf>>,
+    ) -> Option<DirectoryNode> {
+        let mut child_dirs: HashSet<PathBuf> = HashSet::new();
+        for dir in files_by_dir.keys() {
+            if let Ok(rel) = dir.strip_prefix(path) {
+                if rel.components().count() == 1 {
+                    child_dirs.insert(dir.clone());
+                }
+            }
+        }
+
+        if child_dirs.is_empty() {
+            let has_descendants = files_by_dir
+                .keys()
+                .any(|d| d.starts_with(path) && d != path);
+            if has_descendants {
+                for dir in files_by_dir.keys() {
+                    if let Ok(rel) = dir.strip_prefix(path) {
+                        if let Some(first) = rel.components().next() {
+                            child_dirs.insert(path.join(first.as_os_str()));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut children: Vec<DirectoryNode> = child_dirs
+            .iter()
+            .filter_map(|d| build_node(d, files_by_dir))
+            .collect();
+        children.sort_by(|a, b| a.path.cmp(&b.path));
+
+        let files = files_by_dir.get(path).cloned().unwrap_or_default();
+
+        if files.is_empty() && children.is_empty() {
+            return None;
+        }
+
+        Some(DirectoryNode {
+            path: path.clone(),
+            files,
+            children,
+        })
+    }
+
+    build_node(root, &files_by_dir).unwrap_or(DirectoryNode {
+        path: root.clone(),
+        files: Vec::new(),
+        children: Vec::new(),
+    })
 }
