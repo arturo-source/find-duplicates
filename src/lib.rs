@@ -108,3 +108,29 @@ pub fn get_shared_parents(
 
     folders
 }
+
+pub fn format_duplicates(path: PathBuf) -> io::Result<String> {
+    let paths = list_files(path)?;
+    let duplicated_files = get_duplicated_files(paths)?;
+    let shared_parents = get_shared_parents(duplicated_files);
+
+    let mut shared_parents_vec: Vec<_> = shared_parents.into_iter().collect();
+    shared_parents_vec.sort_by(|a, b| b.1.0.len().cmp(&a.1.0.len()));
+
+    let mut output = String::new();
+    for ((parent1, parent2), (files1, files2)) in shared_parents_vec {
+        output.push_str(&format!("In {parent1:?}:\n"));
+        for f in files1 {
+            output.push_str(&format!("  {:?}\n", f.file_name().unwrap()));
+        }
+
+        output.push_str(&format!("In {parent2:?}:\n"));
+        for f in files2 {
+            output.push_str(&format!("  {:?}\n", f.file_name().unwrap()));
+        }
+
+        output.push('\n');
+    }
+
+    Ok(output)
+}
