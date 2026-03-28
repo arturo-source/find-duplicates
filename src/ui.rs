@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 pub struct FindDuplicatesApp {
     tree: Option<DirectoryNode>,
+    root: PathBuf,
     status: String,
 }
 
@@ -10,6 +11,7 @@ impl Default for FindDuplicatesApp {
     fn default() -> Self {
         Self {
             tree: None,
+            root: PathBuf::new(),
             status: "Select a folder to scan for duplicates".into(),
         }
     }
@@ -33,13 +35,13 @@ impl eframe::App for FindDuplicatesApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if let Some(ref tree) = self.tree {
-                    show_node(ui, tree);
+                    show_node(ui, tree, &self.root);
                 }
             });
     }
 }
 
-fn show_node(ui: &mut egui::Ui, node: &DirectoryNode) {
+fn show_node(ui: &mut egui::Ui, node: &DirectoryNode, root: &PathBuf) {
     let name = node
         .path
         .file_name()
@@ -48,16 +50,28 @@ fn show_node(ui: &mut egui::Ui, node: &DirectoryNode) {
     let count = node.total_count();
 
     ui.collapsing(format!("{name} ({count})"), |ui| {
-        for file in &node.files {
-            ui.label(
-                file.file_name()
-                    .unwrap_or(file.as_os_str())
-                    .to_string_lossy()
-                    .to_string(),
-            );
+        for (file, others) in &node.files {
+            let file_name = file
+                .file_name()
+                .unwrap_or(file.as_os_str())
+                .to_string_lossy();
+            if others.is_empty() {
+                ui.label(file_name.to_string());
+            } else {
+                let others_text: Vec<String> = others
+                    .iter()
+                    .map(|p| {
+                        p.strip_prefix(root)
+                            .unwrap_or(p)
+                            .to_string_lossy()
+                            .to_string()
+                    })
+                    .collect();
+                ui.label(format!("{file_name} = {}", others_text.join(", ")));
+            }
         }
         for child in &node.children {
-            show_node(ui, child);
+            show_node(ui, child, root);
         }
     });
 }
@@ -65,6 +79,7 @@ fn show_node(ui: &mut egui::Ui, node: &DirectoryNode) {
 impl FindDuplicatesApp {
     fn scan(&mut self, path: PathBuf) {
         self.tree = None;
+        self.root = path.clone();
         match list_files(path.clone()) {
             Ok(paths) => match get_duplicated_files(paths) {
                 Ok(duplicated_files) => {
