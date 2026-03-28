@@ -20,7 +20,9 @@ pub fn list_files(path: PathBuf) -> io::Result<Vec<PathBuf>> {
 }
 
 fn get_duplicated_files_by_byte(paths: Vec<PathBuf>) -> Vec<Vec<PathBuf>> {
-    let mut buf = [0; 1024];
+    const BUF_SIZE: usize = 1 << 12;
+
+    let mut buf = [0; BUF_SIZE];
     let mut files = Vec::new();
     let mut duplicated_files = Vec::new();
     let mut is_duplicated = vec![false; paths.len()];
