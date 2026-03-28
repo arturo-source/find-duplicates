@@ -1,4 +1,4 @@
-use deduplicator::{get_duplicated_files, get_shared_parents, list_files};
+use find_duplicates::{get_duplicated_files, get_shared_parents, list_files};
 use std::io;
 use std::path::PathBuf;
 
@@ -28,12 +28,12 @@ fn run(path: PathBuf) -> io::Result<String> {
     Ok(output)
 }
 
-struct DeduplicatorApp {
+struct FindDuplicatesApp {
     result: String,
     status: String,
 }
 
-impl Default for DeduplicatorApp {
+impl Default for FindDuplicatesApp {
     fn default() -> Self {
         Self {
             result: String::new(),
@@ -42,9 +42,9 @@ impl Default for DeduplicatorApp {
     }
 }
 
-impl eframe::App for DeduplicatorApp {
+impl eframe::App for FindDuplicatesApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        ui.heading("Deduplicator");
+        ui.heading("Find Duplicates");
         ui.separator();
 
         if ui.button("Select Folder").clicked() {
@@ -84,8 +84,8 @@ fn main() -> Result<(), eframe::Error> {
     };
 
     eframe::run_native(
-        "Deduplicator",
+        "Find Duplicates",
         options,
-        Box::new(|_cc| Ok(Box::new(DeduplicatorApp::default()))),
+        Box::new(|_cc| Ok(Box::new(FindDuplicatesApp::default()))),
     )
 }
