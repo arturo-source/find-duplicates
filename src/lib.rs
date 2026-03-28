@@ -4,6 +4,10 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 
 pub fn list_files(path: PathBuf) -> io::Result<Vec<PathBuf>> {
+    list_files_with_ignore(path, &[])
+}
+
+pub fn list_files_with_ignore(path: PathBuf, ignore: &[String]) -> io::Result<Vec<PathBuf>> {
     if path.is_file() {
         return Ok(vec![path]);
     }
@@ -12,7 +16,13 @@ pub fn list_files(path: PathBuf) -> io::Result<Vec<PathBuf>> {
     let entries = fs::read_dir(path)?;
     for entry in entries {
         let entry_path = entry?.path();
-        let nested_files = list_files(entry_path)?;
+        if let Some(name) = entry_path.file_name() {
+            let name_str = name.to_string_lossy();
+            if ignore.iter().any(|p| name_str == p.as_str()) {
+                continue;
+            }
+        }
+        let nested_files = list_files_with_ignore(entry_path, ignore)?;
         files.extend(nested_files);
     }
 
