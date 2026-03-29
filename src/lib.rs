@@ -31,7 +31,7 @@ fn get_duplicated_files_by_byte(
     const BUF_SIZE: usize = 1 << 12;
 
     let mut buf = [0; BUF_SIZE];
-    let mut files = Vec::new();
+    let mut hashes: Vec<u32> = Vec::new();
     let mut valid_paths: Vec<PathBuf> = Vec::new();
     let mut duplicated_files = Vec::new();
 
@@ -50,21 +50,21 @@ fn get_duplicated_files_by_byte(
                 continue;
             }
         };
-        files.push(buf.clone());
+        hashes.push(crc32fast::hash(&buf));
         valid_paths.push(path.clone());
         on_progress();
     }
 
-    let mut is_duplicated = vec![false; files.len()];
+    let mut is_duplicated = vec![false; hashes.len()];
 
-    for (i, f1) in files.iter().enumerate() {
+    for (i, h1) in hashes.iter().enumerate() {
         if is_duplicated[i] {
             continue;
         }
 
         let mut equal_files = vec![valid_paths[i].clone()];
-        for (j, f2) in files.iter().enumerate().skip(i + 1) {
-            if f1 == f2 {
+        for (j, h2) in hashes.iter().enumerate().skip(i + 1) {
+            if h1 == h2 {
                 is_duplicated[j] = true;
                 equal_files.push(valid_paths[j].clone());
             }

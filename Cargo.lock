@@ -1054,6 +1054,7 @@ dependencies = [
 name = "find-duplicates"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "eframe",
  "egui",
  "rfd",
