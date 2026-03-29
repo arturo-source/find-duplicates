@@ -28,9 +28,6 @@ fn get_duplicated_files_by_byte(
     paths: Vec<PathBuf>,
     on_progress: &mut dyn FnMut(),
 ) -> Vec<Vec<PathBuf>> {
-    const BUF_SIZE: usize = 1 << 12;
-
-    let mut buf = [0; BUF_SIZE];
     let mut hashes: Vec<u32> = Vec::new();
     let mut valid_paths: Vec<PathBuf> = Vec::new();
     let mut duplicated_files = Vec::new();
@@ -43,14 +40,24 @@ fn get_duplicated_files_by_byte(
                 continue;
             }
         };
-        match file.read(&mut buf) {
-            Ok(_) => {}
-            Err(err) => {
-                eprintln!("Warning: Could not read file ({}): {:?}", err, path);
-                continue;
+        let mut hasher = crc32fast::Hasher::new();
+        let mut buf = [0u8; 8192];
+        let mut success = true;
+        loop {
+            match file.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => hasher.update(&buf[..n]),
+                Err(err) => {
+                    eprintln!("Warning: Could not read file ({}): {:?}", err, path);
+                    success = false;
+                    break;
+                }
             }
-        };
-        hashes.push(crc32fast::hash(&buf));
+        }
+        if !success {
+            continue;
+        }
+        hashes.push(hasher.finalize());
         valid_paths.push(path.clone());
         on_progress();
     }
