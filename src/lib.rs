@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 pub fn list_files_with_ignore(
@@ -113,7 +113,7 @@ impl DirectoryNode {
     }
 }
 
-pub fn build_directory_tree(root: &PathBuf, duplicated_files: Vec<Vec<PathBuf>>) -> DirectoryNode {
+pub fn build_directory_tree(root: &Path, duplicated_files: Vec<Vec<PathBuf>>) -> DirectoryNode {
     let mut file_to_others: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
     let mut files_by_dir: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
     for group in &duplicated_files {
@@ -131,7 +131,7 @@ pub fn build_directory_tree(root: &PathBuf, duplicated_files: Vec<Vec<PathBuf>>)
     }
 
     fn build_node(
-        path: &PathBuf,
+        path: &Path,
         files_by_dir: &HashMap<PathBuf, Vec<PathBuf>>,
         file_to_others: &HashMap<PathBuf, Vec<PathBuf>>,
     ) -> Option<DirectoryNode> {
@@ -182,14 +182,14 @@ pub fn build_directory_tree(root: &PathBuf, duplicated_files: Vec<Vec<PathBuf>>)
         }
 
         Some(DirectoryNode {
-            path: path.clone(),
+            path: path.to_path_buf(),
             files,
             children,
         })
     }
 
     build_node(root, &files_by_dir, &file_to_others).unwrap_or(DirectoryNode {
-        path: root.clone(),
+        path: root.to_path_buf(),
         files: Vec::new(),
         children: Vec::new(),
     })

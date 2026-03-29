@@ -2,7 +2,7 @@ use find_duplicates::{
     build_directory_tree, get_duplicated_files, list_files_with_ignore, DirectoryNode,
 };
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
@@ -116,7 +116,7 @@ impl eframe::App for FindDuplicatesApp {
     }
 }
 
-fn show_node(ui: &mut egui::Ui, node: &DirectoryNode, root: &PathBuf) {
+fn show_node(ui: &mut egui::Ui, node: &DirectoryNode, root: &Path) {
     let name = node
         .path
         .file_name()
