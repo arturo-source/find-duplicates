@@ -26,6 +26,7 @@ pub fn list_files_with_ignore(
 
 fn get_duplicated_files_by_byte(
     paths: Vec<PathBuf>,
+    quick_scan: bool,
     on_progress: &mut dyn FnMut(),
 ) -> Vec<Vec<PathBuf>> {
     let mut hashes: Vec<u32> = Vec::new();
@@ -41,21 +42,32 @@ fn get_duplicated_files_by_byte(
             }
         };
         let mut hasher = crc32fast::Hasher::new();
-        let mut buf = [0u8; 8192];
-        let mut success = true;
-        loop {
+        if quick_scan {
+            let mut buf = [0u8; 4096];
             match file.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => hasher.update(&buf[..n]),
+                Ok(_) => hasher.update(&buf),
                 Err(err) => {
                     eprintln!("Warning: Could not read file ({}): {:?}", err, path);
-                    success = false;
-                    break;
+                    continue;
                 }
             }
-        }
-        if !success {
-            continue;
+        } else {
+            let mut buf = [0u8; 8192];
+            let mut success = true;
+            loop {
+                match file.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => hasher.update(&buf[..n]),
+                    Err(err) => {
+                        eprintln!("Warning: Could not read file ({}): {:?}", err, path);
+                        success = false;
+                        break;
+                    }
+                }
+            }
+            if !success {
+                continue;
+            }
         }
         hashes.push(hasher.finalize());
         valid_paths.push(path.clone());
@@ -88,6 +100,7 @@ fn get_duplicated_files_by_byte(
 
 pub fn get_duplicated_files(
     files_by_size: HashMap<u64, Vec<PathBuf>>,
+    quick_scan: bool,
     mut on_progress: impl FnMut(),
 ) -> Vec<Vec<PathBuf>> {
     let mut duplicated_files: Vec<Vec<PathBuf>> = Vec::new();
@@ -96,7 +109,11 @@ pub fn get_duplicated_files(
             continue;
         }
 
-        duplicated_files.extend(get_duplicated_files_by_byte(paths, &mut on_progress));
+        duplicated_files.extend(get_duplicated_files_by_byte(
+            paths,
+            quick_scan,
+            &mut on_progress,
+        ));
     }
 
     duplicated_files

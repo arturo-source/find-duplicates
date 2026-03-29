@@ -23,6 +23,7 @@ pub struct FindDuplicatesApp {
     scan_rx: Option<mpsc::Receiver<ScanMessage>>,
     progress: Option<f32>,
     ctx: egui::Context,
+    quick_scan: bool,
 }
 
 impl FindDuplicatesApp {
@@ -36,6 +37,7 @@ impl FindDuplicatesApp {
             scan_rx: None,
             progress: None,
             ctx,
+            quick_scan: true,
         }
     }
 }
@@ -93,9 +95,10 @@ impl eframe::App for FindDuplicatesApp {
 
         let scanning = self.scan_rx.is_some();
         ui.add_enabled_ui(!scanning, |ui| {
+            ui.checkbox(&mut self.quick_scan, "Quick scan (first 4KB only)");
             if ui.button("Select Folder").clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    self.scan(path);
+                    self.scan(path, self.quick_scan);
                 }
             }
         });
@@ -152,7 +155,7 @@ fn show_node(ui: &mut egui::Ui, node: &DirectoryNode, root: &Path) {
 }
 
 impl FindDuplicatesApp {
-    fn scan(&mut self, path: PathBuf) {
+    fn scan(&mut self, path: PathBuf, quick_scan: bool) {
         self.tree = None;
         self.root = path.clone();
         self.status = "Scanning...".into();
@@ -190,7 +193,7 @@ impl FindDuplicatesApp {
                         .sum();
                     let mut compared = 0usize;
 
-                    let duplicated_files = get_duplicated_files(files_by_size, || {
+                    let duplicated_files = get_duplicated_files(files_by_size, quick_scan, || {
                         compared += 1;
                         if total_to_compare > 0 {
                             let _ = tx.send(ScanMessage::Progress(
