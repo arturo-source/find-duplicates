@@ -4,10 +4,6 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
-pub fn list_files(path: PathBuf) -> io::Result<Vec<PathBuf>> {
-    list_files_with_ignore(path, &HashSet::new())
-}
-
 pub fn list_files_with_ignore(
     path: PathBuf,
     ignore_set: &HashSet<String>,
@@ -103,45 +99,6 @@ pub fn get_duplicated_files(
     }
 
     Ok(duplicated_files)
-}
-
-fn sort_paths<'a>(p1: &'a PathBuf, p2: &'a PathBuf) -> (&'a PathBuf, &'a PathBuf) {
-    if p1 < p2 {
-        (p1, p2)
-    } else {
-        (p2, p1)
-    }
-}
-
-pub fn get_shared_parents(
-    duplicated_files: Vec<Vec<PathBuf>>,
-) -> HashMap<(PathBuf, PathBuf), (Vec<PathBuf>, Vec<PathBuf>)> {
-    let mut folders = HashMap::new();
-    let mut duplicated_files_parents = Vec::with_capacity(duplicated_files.len());
-
-    for same_files in &duplicated_files {
-        let mut same_parents = Vec::with_capacity(same_files.len());
-        for f in same_files {
-            same_parents.push(f.parent().unwrap().to_path_buf());
-        }
-        duplicated_files_parents.push(same_parents);
-    }
-
-    for (i, same_parents) in duplicated_files_parents.iter().enumerate() {
-        for (j, sp1) in same_parents.iter().enumerate() {
-            for (k, sp2) in same_parents.iter().enumerate().skip(j + 1) {
-                let (sp1, sp2) = sort_paths(sp1, sp2);
-
-                let (files1, files2) = folders
-                    .entry((sp1.to_path_buf(), sp2.to_path_buf()))
-                    .or_insert((Vec::new(), Vec::new()));
-                files1.push(duplicated_files[i][j].clone());
-                files2.push(duplicated_files[i][k].clone());
-            }
-        }
-    }
-
-    folders
 }
 
 pub struct DirectoryNode {
