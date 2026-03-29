@@ -80,17 +80,11 @@ fn get_duplicated_files_by_byte(
 }
 
 pub fn get_duplicated_files(
-    paths: Vec<PathBuf>,
+    files_by_size: HashMap<u64, Vec<PathBuf>>,
     mut on_progress: impl FnMut(),
-) -> io::Result<Vec<Vec<PathBuf>>> {
-    let mut map_by_len: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    for path in paths {
-        let len = path.metadata()?.len();
-        map_by_len.entry(len).or_default().push(path);
-    }
-
+) -> Vec<Vec<PathBuf>> {
     let mut duplicated_files: Vec<Vec<PathBuf>> = Vec::new();
-    for (_, paths) in map_by_len {
+    for (_, paths) in files_by_size {
         if paths.len() <= 1 {
             continue;
         }
@@ -98,7 +92,7 @@ pub fn get_duplicated_files(
         duplicated_files.extend(get_duplicated_files_by_byte(paths, &mut on_progress));
     }
 
-    Ok(duplicated_files)
+    duplicated_files
 }
 
 pub struct DirectoryNode {

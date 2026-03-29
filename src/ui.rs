@@ -175,19 +175,22 @@ impl FindDuplicatesApp {
                     )));
                     ctx.request_repaint();
 
-                    let total_to_compare: usize = {
-                        let mut map: std::collections::HashMap<u64, usize> =
-                            std::collections::HashMap::new();
-                        for p in &paths {
-                            if let Ok(m) = p.metadata() {
-                                *map.entry(m.len()).or_default() += 1;
-                            }
+                    let mut files_by_size: std::collections::HashMap<u64, Vec<PathBuf>> =
+                        std::collections::HashMap::new();
+                    for p in &paths {
+                        if let Ok(m) = p.metadata() {
+                            files_by_size.entry(m.len()).or_default().push(p.clone());
                         }
-                        map.into_values().filter(|&c| c > 1).sum()
-                    };
+                    }
+
+                    let total_to_compare: usize = files_by_size
+                        .values()
+                        .filter(|v| v.len() > 1)
+                        .map(|v| v.len())
+                        .sum();
                     let mut compared = 0usize;
 
-                    match get_duplicated_files(paths, || {
+                    let duplicated_files = get_duplicated_files(files_by_size, || {
                         compared += 1;
                         if total_to_compare > 0 {
                             let _ = tx.send(ScanMessage::Progress(
@@ -195,21 +198,14 @@ impl FindDuplicatesApp {
                             ));
                             ctx.request_repaint();
                         }
-                    }) {
-                        Ok(duplicated_files) => {
-                            let _ = tx.send(ScanMessage::Status("Building tree...".into()));
-                            ctx.request_repaint();
+                    });
+                    let _ = tx.send(ScanMessage::Status("Building tree...".into()));
+                    ctx.request_repaint();
 
-                            let tree = build_directory_tree(&path, duplicated_files);
-                            let count = tree.total_count();
-                            let _ = tx.send(ScanMessage::Done(Ok((tree, count))));
-                            ctx.request_repaint();
-                        }
-                        Err(e) => {
-                            let _ = tx.send(ScanMessage::Done(Err(e.to_string())));
-                            ctx.request_repaint();
-                        }
-                    }
+                    let tree = build_directory_tree(&path, duplicated_files);
+                    let count = tree.total_count();
+                    let _ = tx.send(ScanMessage::Done(Ok((tree, count))));
+                    ctx.request_repaint();
                 }
                 Err(e) => {
                     let _ = tx.send(ScanMessage::Done(Err(e.to_string())));
