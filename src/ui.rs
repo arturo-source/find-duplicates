@@ -1,11 +1,13 @@
-use find_duplicates::{
-    DirectoryNode, build_directory_tree, get_duplicated_files, group_files_by_size,
-    list_files_with_ignore,
-};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
+
+use find_duplicates::{
+    build_directory_tree, get_duplicated_files, group_files_by_size, list_files_with_ignore,
+    DirectoryNode,
+};
 
 const DEFAULT_IGNORE: &[&str] = &[".git", "node_modules", "__pycache__", ".DS_Store"];
 
@@ -26,6 +28,7 @@ pub struct FindDuplicatesApp {
     ctx: egui::Context,
     quick_scan: bool,
     min_size: u64,
+    hovered_files: RefCell<HashSet<PathBuf>>,
 }
 
 impl FindDuplicatesApp {
@@ -41,6 +44,7 @@ impl FindDuplicatesApp {
             ctx,
             quick_scan: true,
             min_size: 64,
+            hovered_files: RefCell::new(HashSet::new()),
         }
     }
 }
@@ -120,13 +124,18 @@ impl eframe::App for FindDuplicatesApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if let Some(ref tree) = self.tree {
-                    show_node(ui, tree, &self.root);
+                    show_node(ui, tree, &self.root, &self.hovered_files);
                 }
             });
     }
 }
 
-fn show_node(ui: &mut egui::Ui, node: &DirectoryNode, root: &Path) {
+fn show_node(
+    ui: &mut egui::Ui,
+    node: &DirectoryNode,
+    root: &Path,
+    hovered_files: &RefCell<HashSet<PathBuf>>,
+) {
     let name = node
         .path
         .file_name()
@@ -140,23 +149,49 @@ fn show_node(ui: &mut egui::Ui, node: &DirectoryNode, root: &Path) {
                 .file_name()
                 .unwrap_or(file.as_os_str())
                 .to_string_lossy();
-            if others.is_empty() {
-                ui.label(file_name.to_string());
-            } else {
-                let others_text: Vec<String> = others
-                    .iter()
-                    .map(|p| {
-                        p.strip_prefix(root)
-                            .unwrap_or(p)
+            ui.horizontal(|ui| {
+                let show_label = |ui: &mut egui::Ui, text: &str, open_path: &Path, id: &Path| {
+                    let was_hovered = hovered_files.borrow().contains(id);
+                    let mut rich = egui::RichText::new(text);
+                    if was_hovered {
+                        rich = rich.underline();
+                    }
+                    let resp = ui.add(egui::Label::new(rich).sense(egui::Sense::click()));
+                    let clicked = resp.clicked();
+                    if resp.hovered() {
+                        hovered_files.borrow_mut().insert(id.to_path_buf());
+                        resp.on_hover_text("click to open the folder")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    } else {
+                        hovered_files.borrow_mut().remove(id);
+                    }
+                    if clicked {
+                        let _ = open::that(open_path);
+                    }
+                };
+
+                show_label(
+                    ui,
+                    &file_name.to_string(),
+                    file.parent().unwrap_or(file),
+                    file,
+                );
+
+                if !others.is_empty() {
+                    ui.label("=");
+                    for other in others {
+                        let rel = other
+                            .strip_prefix(root)
+                            .unwrap_or(other)
                             .to_string_lossy()
-                            .to_string()
-                    })
-                    .collect();
-                ui.label(format!("{file_name} = {}", others_text.join(", ")));
-            }
+                            .to_string();
+                        show_label(ui, &rel, other.parent().unwrap_or(other), other);
+                    }
+                }
+            });
         }
         for child in &node.children {
-            show_node(ui, child, root);
+            show_node(ui, child, root, hovered_files);
         }
     });
 }
