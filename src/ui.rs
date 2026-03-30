@@ -1,5 +1,6 @@
 use find_duplicates::{
-    build_directory_tree, get_duplicated_files, list_files_with_ignore, DirectoryNode,
+    DirectoryNode, build_directory_tree, get_duplicated_files, group_files_by_size,
+    list_files_with_ignore,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,7 @@ pub struct FindDuplicatesApp {
     progress: Option<f32>,
     ctx: egui::Context,
     quick_scan: bool,
+    min_size: u64,
 }
 
 impl FindDuplicatesApp {
@@ -38,6 +40,7 @@ impl FindDuplicatesApp {
             progress: None,
             ctx,
             quick_scan: true,
+            min_size: 64,
         }
     }
 }
@@ -96,9 +99,13 @@ impl eframe::App for FindDuplicatesApp {
         let scanning = self.scan_rx.is_some();
         ui.add_enabled_ui(!scanning, |ui| {
             ui.checkbox(&mut self.quick_scan, "Quick scan (first 4KB only)");
+            ui.horizontal(|ui| {
+                ui.label("Min file size (bytes):");
+                ui.add(egui::DragValue::new(&mut self.min_size).range(0..=u64::MAX));
+            });
             if ui.button("Select Folder").clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    self.scan(path, self.quick_scan);
+                    self.scan(path, self.quick_scan, self.min_size);
                 }
             }
         });
@@ -155,7 +162,7 @@ fn show_node(ui: &mut egui::Ui, node: &DirectoryNode, root: &Path) {
 }
 
 impl FindDuplicatesApp {
-    fn scan(&mut self, path: PathBuf, quick_scan: bool) {
+    fn scan(&mut self, path: PathBuf, quick_scan: bool, min_size: u64) {
         self.tree = None;
         self.root = path.clone();
         self.status = "Scanning...".into();
@@ -178,13 +185,7 @@ impl FindDuplicatesApp {
                     )));
                     ctx.request_repaint();
 
-                    let mut files_by_size: std::collections::HashMap<u64, Vec<PathBuf>> =
-                        std::collections::HashMap::new();
-                    for p in &paths {
-                        if let Ok(m) = p.metadata() {
-                            files_by_size.entry(m.len()).or_default().push(p.clone());
-                        }
-                    }
+                    let files_by_size = group_files_by_size(&paths, min_size);
 
                     let total_to_compare: usize = files_by_size
                         .values()

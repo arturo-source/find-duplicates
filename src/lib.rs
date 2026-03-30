@@ -98,6 +98,19 @@ fn get_duplicated_files_by_byte(
     duplicated_files
 }
 
+pub fn group_files_by_size(paths: &[PathBuf], min_size: u64) -> HashMap<u64, Vec<PathBuf>> {
+    let mut files_by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+    for p in paths {
+        if let Ok(m) = p.metadata() {
+            let len = m.len();
+            if len >= min_size {
+                files_by_size.entry(len).or_default().push(p.clone());
+            }
+        }
+    }
+    files_by_size
+}
+
 pub fn get_duplicated_files(
     files_by_size: HashMap<u64, Vec<PathBuf>>,
     quick_scan: bool,
