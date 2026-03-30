@@ -7,17 +7,16 @@ A desktop application to find duplicate files across directories. Built with Rus
 ## How it works
 
 1. Select a folder to scan
-2. The app groups files by size, then compares the first 4KB of each file with matching sizes
+2. The app groups files by size, then compares files with matching sizes using CRC32 hashing
 3. Duplicates are displayed in a tree view grouped by directory
 
 ## Features
 
+- Quick scan (first 4KB) or full file comparison
+- Minimum file size filter to skip small files
 - Configurable ignore patterns
 - Tree view of duplicates grouped by folder
-
-## TODO
-
-- [ ] Optimize RAM usage for large file sets — currently loads all file paths and first 4KB of every file into memory. Use iterators/lazy evaluation instead.
+- Click any file path to open its folder in the file explorer
 
 ## Build
 
