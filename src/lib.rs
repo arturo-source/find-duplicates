@@ -132,12 +132,11 @@ impl DirectoryNode {
 }
 
 pub fn build_directory_tree(root: &Path, duplicated_files: Vec<Vec<PathBuf>>) -> DirectoryNode {
-    let mut file_to_others: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    let mut file_to_group: HashMap<PathBuf, usize> = HashMap::new();
     let mut files_by_dir: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-    for group in &duplicated_files {
+    for (group_idx, group) in duplicated_files.iter().enumerate() {
         for file in group {
-            let others: Vec<PathBuf> = group.iter().filter(|f| *f != file).cloned().collect();
-            file_to_others.insert(file.clone(), others);
+            file_to_group.insert(file.clone(), group_idx);
 
             if let Some(parent) = file.parent() {
                 files_by_dir
@@ -151,7 +150,8 @@ pub fn build_directory_tree(root: &Path, duplicated_files: Vec<Vec<PathBuf>>) ->
     fn build_node(
         path: &Path,
         files_by_dir: &HashMap<PathBuf, Vec<PathBuf>>,
-        file_to_others: &HashMap<PathBuf, Vec<PathBuf>>,
+        file_to_group: &HashMap<PathBuf, usize>,
+        duplicated_files: &Vec<Vec<PathBuf>>,
     ) -> Option<DirectoryNode> {
         let mut child_dirs: HashSet<PathBuf> = HashSet::new();
         for dir in files_by_dir.keys() {
@@ -179,7 +179,7 @@ pub fn build_directory_tree(root: &Path, duplicated_files: Vec<Vec<PathBuf>>) ->
 
         let mut children: Vec<DirectoryNode> = child_dirs
             .iter()
-            .filter_map(|d| build_node(d, files_by_dir, file_to_others))
+            .filter_map(|d| build_node(d, files_by_dir, file_to_group, duplicated_files))
             .collect();
         children.sort_by(|a, b| a.path.cmp(&b.path));
 
@@ -188,7 +188,11 @@ pub fn build_directory_tree(root: &Path, duplicated_files: Vec<Vec<PathBuf>>) ->
             .map(|fs| {
                 fs.iter()
                     .map(|f| {
-                        let others = file_to_others.get(f).cloned().unwrap_or_default();
+                        let others = file_to_group
+                            .get(f)
+                            .and_then(|&idx| duplicated_files.get(idx))
+                            .map(|group| group.iter().filter(|p| *p != f).cloned().collect())
+                            .unwrap_or_default();
                         (f.clone(), others)
                     })
                     .collect()
@@ -206,7 +210,7 @@ pub fn build_directory_tree(root: &Path, duplicated_files: Vec<Vec<PathBuf>>) ->
         })
     }
 
-    build_node(root, &files_by_dir, &file_to_others).unwrap_or(DirectoryNode {
+    build_node(root, &files_by_dir, &file_to_group, &duplicated_files).unwrap_or(DirectoryNode {
         path: root.to_path_buf(),
         files: Vec::new(),
         children: Vec::new(),
