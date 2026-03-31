@@ -203,7 +203,7 @@ impl eframe::App for FindDuplicatesApp {
                     };
                     ui.label(text);
                 });
-                if active {
+                if active && step == ScanStep::Finding {
                     ui.add(egui::ProgressBar::new(sp.progress).show_percentage());
                 }
             }
