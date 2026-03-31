@@ -5,8 +5,8 @@ use std::sync::mpsc;
 use std::thread;
 
 use find_duplicates::{
-    build_directory_tree, get_duplicated_files, group_files_by_size, list_files_with_ignore,
-    DirectoryNode,
+    DirectoryNode, build_directory_tree, get_duplicated_files, group_files_by_size,
+    list_files_with_ignore,
 };
 
 const DEFAULT_IGNORE: &[&str] = &[".git", "node_modules", "__pycache__", ".DS_Store"];
@@ -204,11 +204,7 @@ impl eframe::App for FindDuplicatesApp {
                     ui.label(text);
                 });
                 if active {
-                    ui.add(
-                        egui::ProgressBar::new(sp.progress)
-                            .show_percentage()
-                            .animate(true),
-                    );
+                    ui.add(egui::ProgressBar::new(sp.progress).show_percentage());
                 }
             }
         }
