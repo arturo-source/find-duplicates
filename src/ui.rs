@@ -78,6 +78,10 @@ pub struct FindDuplicatesApp {
 
 impl FindDuplicatesApp {
     pub fn new(ctx: egui::Context) -> Self {
+        match dark_light::detect() {
+            Ok(dark_light::Mode::Dark) => ctx.set_theme(egui::Theme::Dark),
+            _ => ctx.set_theme(egui::Theme::Light),
+        }
         Self {
             tree: None,
             root: PathBuf::new(),
@@ -217,6 +221,10 @@ impl eframe::App for FindDuplicatesApp {
                     show_node(ui, tree, &self.root, &self.hovered_files);
                 }
             });
+    }
+
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.window_fill().to_normalized_gamma_f32()
     }
 }
 
