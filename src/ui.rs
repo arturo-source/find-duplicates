@@ -5,8 +5,8 @@ use std::sync::mpsc;
 use std::thread;
 
 use find_duplicates::{
-    build_directory_tree, get_duplicated_files, group_files_by_size, list_files_with_ignore,
-    DirectoryNode,
+    DirectoryNode, build_directory_tree, get_duplicated_files, group_files_by_size,
+    list_files_with_ignore,
 };
 
 const DEFAULT_IGNORE: &[&str] = &[".git", "node_modules", "__pycache__", ".DS_Store"];
@@ -43,8 +43,21 @@ fn parse_size(input: &str) -> Option<u64> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum ScanStep {
+    Listing,
+    Finding,
+    Building,
+}
+
+struct ScanProgress {
+    step: ScanStep,
+    progress: f32,
+    done: bool,
+}
+
 enum ScanMessage {
-    Status(String),
+    Step(ScanStep),
     Progress(f32),
     Done(Result<(DirectoryNode, usize), String>),
 }
@@ -52,11 +65,10 @@ enum ScanMessage {
 pub struct FindDuplicatesApp {
     tree: Option<DirectoryNode>,
     root: PathBuf,
-    status: String,
     patterns: Vec<String>,
     new_pattern: String,
     scan_rx: Option<mpsc::Receiver<ScanMessage>>,
-    progress: Option<f32>,
+    scan_progress: Option<ScanProgress>,
     ctx: egui::Context,
     quick_scan: bool,
     min_size: u64,
@@ -69,11 +81,10 @@ impl FindDuplicatesApp {
         Self {
             tree: None,
             root: PathBuf::new(),
-            status: "Select a folder to scan for duplicates".into(),
             patterns: DEFAULT_IGNORE.iter().map(|s| s.to_string()).collect(),
             new_pattern: String::new(),
             scan_rx: None,
-            progress: None,
+            scan_progress: None,
             ctx,
             quick_scan: true,
             min_size: 64,
@@ -89,21 +100,26 @@ impl eframe::App for FindDuplicatesApp {
             let messages: Vec<_> = rx.try_iter().collect();
             for msg in messages {
                 match msg {
-                    ScanMessage::Status(s) => self.status = s,
-                    ScanMessage::Progress(p) => self.progress = Some(p),
+                    ScanMessage::Step(step) => {
+                        self.scan_progress = Some(ScanProgress {
+                            step,
+                            progress: 0.0,
+                            done: false,
+                        });
+                    }
+                    ScanMessage::Progress(p) => {
+                        if let Some(ref mut sp) = self.scan_progress {
+                            sp.progress = p;
+                        }
+                    }
                     ScanMessage::Done(result) => {
                         self.scan_rx = None;
-                        self.progress = None;
-                        match result {
-                            Ok((tree, count)) => {
-                                if count == 0 {
-                                    self.status = "No duplicates found.".into();
-                                } else {
-                                    self.status = format!("Found {count} duplicates.");
-                                }
-                                self.tree = Some(tree);
-                            }
-                            Err(e) => self.status = format!("Error: {e}"),
+                        if let Some(ref mut sp) = self.scan_progress {
+                            sp.progress = 1.0;
+                            sp.done = true;
+                        }
+                        if let Ok((tree, _)) = result {
+                            self.tree = Some(tree);
                         }
                     }
                 }
@@ -158,9 +174,40 @@ impl eframe::App for FindDuplicatesApp {
             }
         });
 
-        ui.label(&self.status);
-        if let Some(p) = self.progress {
-            ui.add(egui::ProgressBar::new(p).show_percentage());
+        if let Some(ref sp) = self.scan_progress {
+            let steps = [
+                (ScanStep::Listing, "Listing files"),
+                (ScanStep::Finding, "Finding duplicates"),
+                (ScanStep::Building, "Building tree"),
+            ];
+            for (step, label) in steps {
+                let done = sp.done || sp.step as usize > step as usize;
+                let active = !sp.done && sp.step == step;
+                ui.horizontal(|ui| {
+                    if done {
+                        ui.colored_label(egui::Color32::from_rgb(80, 200, 80), "\u{2713}");
+                    } else if active {
+                        ui.spinner();
+                    } else {
+                        ui.colored_label(egui::Color32::GRAY, "\u{25CB}");
+                    }
+                    let text = if active {
+                        egui::RichText::new(label).strong()
+                    } else if done {
+                        egui::RichText::new(label).color(egui::Color32::from_rgb(80, 200, 80))
+                    } else {
+                        egui::RichText::new(label).color(egui::Color32::GRAY)
+                    };
+                    ui.label(text);
+                });
+                if active {
+                    ui.add(
+                        egui::ProgressBar::new(sp.progress)
+                            .show_percentage()
+                            .animate(true),
+                    );
+                }
+            }
         }
         ui.separator();
 
@@ -244,7 +291,7 @@ impl FindDuplicatesApp {
     fn scan(&mut self, path: PathBuf, quick_scan: bool, min_size: u64) {
         self.tree = None;
         self.root = path.clone();
-        self.status = "Scanning...".into();
+        self.scan_progress = None;
 
         let (tx, rx) = mpsc::channel();
         self.scan_rx = Some(rx);
@@ -253,15 +300,12 @@ impl FindDuplicatesApp {
         let ctx = self.ctx.clone();
 
         thread::spawn(move || {
-            let _ = tx.send(ScanMessage::Status("Listing files...".into()));
+            let _ = tx.send(ScanMessage::Step(ScanStep::Listing));
             ctx.request_repaint();
 
             match list_files_with_ignore(path.clone(), &ignore_set, min_size) {
                 Ok(paths) => {
-                    let file_count = paths.len();
-                    let _ = tx.send(ScanMessage::Status(format!(
-                        "Found {file_count} files. Searching for duplicates..."
-                    )));
+                    let _ = tx.send(ScanMessage::Step(ScanStep::Finding));
                     ctx.request_repaint();
 
                     let files_by_size = group_files_by_size(&paths);
@@ -282,7 +326,7 @@ impl FindDuplicatesApp {
                             ctx.request_repaint();
                         }
                     });
-                    let _ = tx.send(ScanMessage::Status("Building tree...".into()));
+                    let _ = tx.send(ScanMessage::Step(ScanStep::Building));
                     ctx.request_repaint();
 
                     let tree = build_directory_tree(&path, duplicated_files);
