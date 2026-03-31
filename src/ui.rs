@@ -177,7 +177,7 @@ impl eframe::App for FindDuplicatesApp {
                 }
             }
             if !self.root.as_os_str().is_empty() {
-                ui.label(self.root.display().to_string());
+                ui.label(format!("Selected {}", self.root.display()));
             }
         });
 
