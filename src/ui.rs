@@ -5,8 +5,8 @@ use std::sync::mpsc;
 use std::thread;
 
 use find_duplicates::{
-    DirectoryNode, build_directory_tree, get_duplicated_files, group_files_by_size,
-    list_files_with_ignore,
+    build_directory_tree, get_duplicated_files, group_files_by_size, list_files_with_ignore,
+    DirectoryNode,
 };
 
 const DEFAULT_IGNORE: &[&str] = &[".git", "node_modules", "__pycache__", ".DS_Store"];
@@ -192,11 +192,11 @@ impl eframe::App for FindDuplicatesApp {
                 let active = !sp.done && sp.step == step;
                 ui.horizontal(|ui| {
                     if done {
-                        ui.colored_label(egui::Color32::from_rgb(80, 200, 80), "\u{2713}");
+                        ui.colored_label(egui::Color32::from_rgb(80, 200, 80), "[x]");
                     } else if active {
                         ui.spinner();
                     } else {
-                        ui.colored_label(egui::Color32::GRAY, "\u{25CB}");
+                        ui.colored_label(egui::Color32::GRAY, "[ ]");
                     }
                     let text = if active {
                         egui::RichText::new(label).strong()
