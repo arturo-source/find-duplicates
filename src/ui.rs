@@ -256,7 +256,7 @@ impl FindDuplicatesApp {
             let _ = tx.send(ScanMessage::Status("Listing files...".into()));
             ctx.request_repaint();
 
-            match list_files_with_ignore(path.clone(), &ignore_set) {
+            match list_files_with_ignore(path.clone(), &ignore_set, min_size) {
                 Ok(paths) => {
                     let file_count = paths.len();
                     let _ = tx.send(ScanMessage::Status(format!(
@@ -264,7 +264,7 @@ impl FindDuplicatesApp {
                     )));
                     ctx.request_repaint();
 
-                    let files_by_size = group_files_by_size(&paths, min_size);
+                    let files_by_size = group_files_by_size(&paths);
 
                     let total_to_compare: usize = files_by_size
                         .values()
