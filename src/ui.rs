@@ -11,6 +11,38 @@ use find_duplicates::{
 
 const DEFAULT_IGNORE: &[&str] = &[".git", "node_modules", "__pycache__", ".DS_Store"];
 
+fn parse_size(input: &str) -> Option<u64> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+
+    // Try parsing as a plain number (bytes)
+    if let Ok(bytes) = input.parse::<u64>() {
+        return Some(bytes);
+    }
+
+    let (num_str, suffix) = input.split_at(input.find(|c: char| c.is_alphabetic())?);
+    let num: f64 = num_str.trim().parse().ok()?;
+    let suffix = suffix.trim().to_lowercase();
+
+    let multiplier: f64 = match suffix.as_str() {
+        "b" | "byte" | "bytes" => 1.0,
+        "kb" | "kilobyte" | "kilobytes" => 1024.0,
+        "mb" | "megabyte" | "megabytes" => 1024.0 * 1024.0,
+        "gb" | "gigabyte" | "gigabytes" => 1024.0 * 1024.0 * 1024.0,
+        "tb" | "terabyte" | "terabytes" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+
+    let result = num * multiplier;
+    if result.is_finite() && result >= 0.0 {
+        Some(result as u64)
+    } else {
+        None
+    }
+}
+
 enum ScanMessage {
     Status(String),
     Progress(f32),
@@ -28,6 +60,7 @@ pub struct FindDuplicatesApp {
     ctx: egui::Context,
     quick_scan: bool,
     min_size: u64,
+    size_input: String,
     hovered_files: RefCell<HashSet<PathBuf>>,
 }
 
@@ -44,6 +77,7 @@ impl FindDuplicatesApp {
             ctx,
             quick_scan: true,
             min_size: 64,
+            size_input: "64 bytes".into(),
             hovered_files: RefCell::new(HashSet::new()),
         }
     }
@@ -104,8 +138,18 @@ impl eframe::App for FindDuplicatesApp {
         ui.add_enabled_ui(!scanning, |ui| {
             ui.checkbox(&mut self.quick_scan, "Quick scan (first 4KB only)");
             ui.horizontal(|ui| {
-                ui.label("Min file size (bytes):");
-                ui.add(egui::DragValue::new(&mut self.min_size).range(0..=u64::MAX));
+                ui.label("Min file size:");
+                let response = ui.text_edit_singleline(&mut self.size_input);
+                if response.changed() {
+                    if let Some(bytes) = parse_size(&self.size_input) {
+                        self.min_size = bytes;
+                    }
+                }
+                if let Some(bytes) = parse_size(&self.size_input) {
+                    ui.label(format!("({} bytes)", bytes));
+                } else if !self.size_input.is_empty() {
+                    ui.colored_label(egui::Color32::YELLOW, "e.g. 1MB, 50KB, 64 bytes");
+                }
             });
             if ui.button("Select Folder").clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
