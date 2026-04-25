@@ -17,7 +17,6 @@ fn parse_size(input: &str) -> Option<u64> {
         return None;
     }
 
-    // Try parsing as a plain number (bytes)
     if let Ok(bytes) = input.parse::<u64>() {
         return Some(bytes);
     }
@@ -74,6 +73,8 @@ pub struct FindDuplicatesApp {
     min_size: u64,
     size_input: String,
     hovered_files: RefCell<HashSet<PathBuf>>,
+    show_settings: bool,
+    settings_pos: egui::Pos2,
 }
 
 impl FindDuplicatesApp {
@@ -94,6 +95,8 @@ impl FindDuplicatesApp {
             min_size: 64,
             size_input: "64 bytes".into(),
             hovered_files: RefCell::new(HashSet::new()),
+            show_settings: false,
+            settings_pos: egui::Pos2::ZERO,
         }
     }
 }
@@ -129,90 +132,140 @@ impl eframe::App for FindDuplicatesApp {
                 }
             }
         }
-        ui.collapsing("Ignore Patterns", |ui| {
-            let mut remove_idx = None;
-            for (i, pattern) in self.patterns.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(pattern);
-                    if ui.small_button("x").clicked() {
-                        remove_idx = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove_idx {
-                self.patterns.remove(i);
-            }
-
-            ui.horizontal(|ui| {
-                ui.text_edit_singleline(&mut self.new_pattern);
-                if ui.button("Add").clicked() && !self.new_pattern.is_empty() {
-                    self.patterns.push(self.new_pattern.clone());
-                    self.new_pattern.clear();
-                }
-            });
-        });
-
-        ui.separator();
 
         let scanning = self.scan_rx.is_some();
-        ui.add_enabled_ui(!scanning, |ui| {
-            ui.checkbox(&mut self.quick_scan, "Quick scan (first 4KB only)");
+
+        let rect = ui.max_rect();
+        let btn_width = 120.0;
+        let total_width = btn_width * 2.0 + 16.0;
+        let start_x = rect.center().x - total_width / 2.0;
+        let btn_rect = egui::Rect::from_min_size(egui::Pos2::new(start_x, 0.0), egui::vec2(total_width, 40.0));
+
+        ui.scope_builder(egui::UiBuilder::new().max_rect(btn_rect), |ui| {
+            ui.set_min_size(egui::vec2(total_width, 40.0));
             ui.horizontal(|ui| {
-                ui.label("Min file size:");
-                let response = ui.text_edit_singleline(&mut self.size_input);
-                if response.changed() {
-                    if let Some(bytes) = parse_size(&self.size_input) {
-                        self.min_size = bytes;
+                let btn = ui.button("Select Folder");
+                if btn.clicked() {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        self.scan(path, self.quick_scan, self.min_size);
                     }
                 }
-                if let Some(bytes) = parse_size(&self.size_input) {
-                    ui.label(format!("({} bytes)", bytes));
-                } else if !self.size_input.is_empty() {
-                    ui.colored_label(egui::Color32::YELLOW, "e.g. 1MB, 50KB, 64 bytes");
+
+                ui.add_space(16.0);
+
+                let btn = ui.button("Settings");
+                if btn.clicked() {
+                    self.settings_pos = btn.rect.center();
+                    self.show_settings = !self.show_settings;
                 }
             });
-            if ui.button("Select Folder").clicked() {
-                if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    self.scan(path, self.quick_scan, self.min_size);
-                }
-            }
-            if !self.root.as_os_str().is_empty() {
-                ui.label(format!("Selected {}", self.root.display()));
-            }
         });
 
-        if let Some(ref sp) = self.scan_progress {
-            let steps = [
-                (ScanStep::Listing, "Listing files"),
-                (ScanStep::Finding, "Finding duplicates"),
-                (ScanStep::Building, "Building tree"),
-            ];
-            for (step, label) in steps {
-                let done = sp.done || sp.step as usize > step as usize;
-                let active = !sp.done && sp.step == step;
-                ui.horizontal(|ui| {
-                    if done {
-                        ui.colored_label(egui::Color32::from_rgb(80, 200, 80), "[x]");
-                    } else if active {
-                        ui.spinner();
-                    } else {
-                        ui.colored_label(egui::Color32::GRAY, "[ ]");
+        if self.show_settings {
+            let rect = ui.max_rect();
+            let padding = 40.0;
+            let panel_rect = egui::Rect::from_min_size(
+                egui::Pos2::new(padding, padding),
+                egui::vec2(rect.width() - padding * 2.0, rect.height() - padding * 2.0),
+            );
+
+            egui::Area::new("settings_panel".into())
+                .current_pos(egui::Pos2::new(padding, padding))
+                .movable(false)
+                .interactable(true)
+                .show(ui.ctx(), |ui: &mut egui::Ui| {
+                    egui::Frame::popup(ui.style_mut())
+                        .inner_margin(egui::vec2(12.0, 12.0))
+                        .show(ui, |ui| {
+                            ui.set_min_size(panel_rect.size());
+
+                            ui.heading("Settings");
+
+                            ui.separator();
+
+                            ui.collapsing("Ignore Patterns", |ui| {
+                            let mut remove_idx = None;
+                            for (i, pattern) in self.patterns.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(pattern);
+                                    if ui.small_button("x").clicked() {
+                                        remove_idx = Some(i);
+                                    }
+                                });
+                            }
+                            if let Some(i) = remove_idx {
+                                self.patterns.remove(i);
+                            }
+
+                            ui.horizontal(|ui| {
+                                ui.text_edit_singleline(&mut self.new_pattern);
+                                if ui.button("Add").clicked() && !self.new_pattern.is_empty() {
+                                    self.patterns.push(self.new_pattern.clone());
+                                    self.new_pattern.clear();
+                                }
+                            });
+                        });
+
+                        ui.checkbox(&mut self.quick_scan, "Quick scan (first 4KB only)");
+
+                        ui.horizontal(|ui| {
+                            ui.label("Min file size:");
+                            let response = ui.text_edit_singleline(&mut self.size_input);
+                            if response.changed() {
+                                if let Some(bytes) = parse_size(&self.size_input) {
+                                    self.min_size = bytes;
+                                }
+                            }
+                            if let Some(bytes) = parse_size(&self.size_input) {
+                                ui.label(format!("({} bytes)", bytes));
+                            } else if !self.size_input.is_empty() {
+                                ui.colored_label(egui::Color32::YELLOW, "e.g. 1MB, 50KB, 64 bytes");
+                            }
+                        });
+
+                        ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                            let btn = ui.button("Close Settings");
+                            if btn.clicked() {
+                                self.show_settings = false;
+                            }
+                        });
+                    });
+            });
+        }
+
+        if scanning {
+            if let Some(ref sp) = self.scan_progress {
+                let steps = [
+                    (ScanStep::Listing, "Listing files"),
+                    (ScanStep::Finding, "Finding duplicates"),
+                    (ScanStep::Building, "Building tree"),
+                ];
+                for (step, label) in steps {
+                    let done = sp.done || sp.step as usize > step as usize;
+                    let active = !sp.done && sp.step == step;
+                    ui.horizontal(|ui| {
+                        if done {
+                            ui.colored_label(egui::Color32::from_rgb(80, 200, 80), "✓");
+                        } else if active {
+                            ui.spinner();
+                        } else {
+                            ui.colored_label(egui::Color32::GRAY, "○");
+                        }
+                        let text = if active {
+                            egui::RichText::new(label).strong()
+                        } else if done {
+                            egui::RichText::new(label).color(egui::Color32::from_rgb(80, 200, 80))
+                        } else {
+                            egui::RichText::new(label).color(egui::Color32::GRAY)
+                        };
+                        ui.label(text);
+                    });
+                    if active && step == ScanStep::Finding {
+                        ui.add(egui::ProgressBar::new(sp.progress).show_percentage());
                     }
-                    let text = if active {
-                        egui::RichText::new(label).strong()
-                    } else if done {
-                        egui::RichText::new(label).color(egui::Color32::from_rgb(80, 200, 80))
-                    } else {
-                        egui::RichText::new(label).color(egui::Color32::GRAY)
-                    };
-                    ui.label(text);
-                });
-                if active && step == ScanStep::Finding {
-                    ui.add(egui::ProgressBar::new(sp.progress).show_percentage());
                 }
             }
         }
-        ui.separator();
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -248,25 +301,26 @@ fn show_node(
                 .unwrap_or(file.as_os_str())
                 .to_string_lossy();
             ui.horizontal(|ui| {
-                let show_label = |ui: &mut egui::Ui, text: &str, open_path: &Path, id: &Path| {
-                    let was_hovered = hovered_files.borrow().contains(id);
-                    let mut rich = egui::RichText::new(text);
-                    if was_hovered {
-                        rich = rich.underline();
-                    }
-                    let resp = ui.add(egui::Label::new(rich).sense(egui::Sense::click()));
-                    let clicked = resp.clicked();
-                    if resp.hovered() {
-                        hovered_files.borrow_mut().insert(id.to_path_buf());
-                        resp.on_hover_text("click to open the folder")
-                            .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    } else {
-                        hovered_files.borrow_mut().remove(id);
-                    }
-                    if clicked {
-                        let _ = open::that(open_path);
-                    }
-                };
+                let show_label =
+                    |ui: &mut egui::Ui, text: &str, open_path: &Path, id: &Path| {
+                        let was_hovered = hovered_files.borrow().contains(id);
+                        let mut rich = egui::RichText::new(text);
+                        if was_hovered {
+                            rich = rich.underline();
+                        }
+                        let resp = ui.add(egui::Label::new(rich).sense(egui::Sense::click()));
+                        let clicked = resp.clicked();
+                        if resp.hovered() {
+                            hovered_files.borrow_mut().insert(id.to_path_buf());
+                            resp.on_hover_text("click to open the folder")
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        } else {
+                            hovered_files.borrow_mut().remove(id);
+                        }
+                        if clicked {
+                            let _ = open::that(open_path);
+                        }
+                    };
 
                 show_label(
                     ui,
@@ -299,6 +353,7 @@ impl FindDuplicatesApp {
         self.tree = None;
         self.root = path.clone();
         self.scan_progress = None;
+        self.show_settings = false;
 
         let (tx, rx) = mpsc::channel();
         self.scan_rx = Some(rx);
