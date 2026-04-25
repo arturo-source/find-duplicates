@@ -1189,7 +1189,7 @@ dependencies = [
 
 [[package]]
 name = "find-duplicates"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "crc32fast",
  "dark-light",

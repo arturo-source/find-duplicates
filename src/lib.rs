@@ -135,6 +135,7 @@ pub fn get_duplicated_files(
     duplicated_files
 }
 
+#[derive(Clone)]
 pub struct DirectoryNode {
     pub path: PathBuf,
     pub files: Vec<(PathBuf, Vec<PathBuf>)>,

@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -73,6 +73,10 @@ pub struct FindDuplicatesApp {
     min_size: u64,
     size_input: String,
     hovered_files: RefCell<HashSet<PathBuf>>,
+    expanded_folders: RefCell<HashSet<PathBuf>>,
+    hovered_folder: RefCell<Option<PathBuf>>,
+    hovered_folder_pos: RefCell<egui::Pos2>,
+    folder_info_cache: RefCell<HashMap<PathBuf, Vec<(PathBuf, usize)>> >,
     show_settings: bool,
     settings_pos: egui::Pos2,
 }
@@ -94,7 +98,11 @@ impl FindDuplicatesApp {
             quick_scan: true,
             min_size: 64,
             size_input: "64 bytes".into(),
-            hovered_files: RefCell::new(HashSet::new()),
+hovered_files: RefCell::new(HashSet::new()),
+            expanded_folders: RefCell::new(HashSet::new()),
+            hovered_folder: RefCell::new(None),
+            hovered_folder_pos: RefCell::new(egui::Pos2::ZERO),
+            folder_info_cache: RefCell::new(HashMap::new()),
             show_settings: false,
             settings_pos: egui::Pos2::ZERO,
         }
@@ -119,15 +127,18 @@ impl eframe::App for FindDuplicatesApp {
                             sp.progress = p;
                         }
                     }
-                    ScanMessage::Done(result) => {
+                    ScanMessage::Done(Ok((tree, _))) => {
                         self.scan_rx = None;
                         if let Some(ref mut sp) = self.scan_progress {
                             sp.progress = 1.0;
                             sp.done = true;
                         }
-                        if let Ok((tree, _)) = result {
-                            self.tree = Some(tree);
-                        }
+                        let tree_opt = tree.clone();
+                        self.tree = Some(tree);
+                        self.populate_folder_cache(&tree_opt);
+                    }
+                    ScanMessage::Done(Err(_)) => {
+                        self.scan_rx = None;
                     }
                 }
             }
@@ -271,9 +282,40 @@ impl eframe::App for FindDuplicatesApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if let Some(ref tree) = self.tree {
-                    show_node(ui, tree, &self.root, &self.hovered_files);
+                    show_flat_list(
+                        ui,
+                        tree,
+                        &self.root,
+                        &self.hovered_files,
+                        &self.expanded_folders,
+                        &self.hovered_folder,
+                        &self.hovered_folder_pos,
+                    );
                 }
             });
+
+if let Some(ref hovered) = *self.hovered_folder.borrow() {
+            let pos = *self.hovered_folder_pos.borrow();
+            let root = &self.root;
+
+            let folder_info = self.folder_info_cache.borrow().get(hovered).cloned();
+
+            if let Some(folder_info) = folder_info {
+                if !folder_info.is_empty() {
+                    egui::Window::new(egui::WidgetText::from("hover_info"))
+                        .title_bar(false)
+                        .resizable(false)
+                        .interactable(false)
+                        .current_pos(pos)
+                        .show(ui.ctx(), |ui| {
+                            for (path, count) in folder_info {
+                                let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
+                                ui.label(format!("{} ({})", rel, count));
+                            }
+                        });
+                }
+            }
+        }
     }
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
@@ -281,71 +323,117 @@ impl eframe::App for FindDuplicatesApp {
     }
 }
 
-fn show_node(
+fn show_flat_list(
     ui: &mut egui::Ui,
     node: &DirectoryNode,
     root: &Path,
     hovered_files: &RefCell<HashSet<PathBuf>>,
+    expanded_folders: &RefCell<HashSet<PathBuf>>,
+    hovered_folder: &RefCell<Option<PathBuf>>,
+    hovered_folder_pos: &RefCell<egui::Pos2>,
 ) {
-    let name = node
-        .path
-        .file_name()
-        .unwrap_or(node.path.as_os_str())
-        .to_string_lossy();
-    let count = node.total_count();
+    let currently_hovered = RefCell::new(HashSet::new());
+    *hovered_folder.borrow_mut() = None;
 
-    ui.collapsing(format!("{name} ({count})"), |ui| {
-        for (file, others) in &node.files {
-            let file_name = file
-                .file_name()
-                .unwrap_or(file.as_os_str())
-                .to_string_lossy();
-            ui.horizontal(|ui| {
-                let show_label =
-                    |ui: &mut egui::Ui, text: &str, open_path: &Path, id: &Path| {
-                        let was_hovered = hovered_files.borrow().contains(id);
-                        let mut rich = egui::RichText::new(text);
-                        if was_hovered {
-                            rich = rich.underline();
-                        }
-                        let resp = ui.add(egui::Label::new(rich).sense(egui::Sense::click()));
-                        let clicked = resp.clicked();
-                        if resp.hovered() {
-                            hovered_files.borrow_mut().insert(id.to_path_buf());
-                            resp.on_hover_text("click to open the folder")
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
-                        } else {
-                            hovered_files.borrow_mut().remove(id);
-                        }
-                        if clicked {
-                            let _ = open::that(open_path);
-                        }
-                    };
+    fn collect_folders(node: &DirectoryNode) -> Vec<&DirectoryNode> {
+        let mut folders = Vec::new();
+        if !node.files.is_empty() {
+            folders.push(node);
+        }
+        for child in &node.children {
+            folders.extend(collect_folders(child));
+        }
+        folders
+    }
 
-                show_label(
-                    ui,
-                    &file_name.to_string(),
-                    file.parent().unwrap_or(file),
-                    file,
-                );
+    let folders = collect_folders(node);
+    for folder in folders {
+        let rel_path = folder
+            .path
+            .strip_prefix(root)
+            .unwrap_or(&folder.path)
+            .to_string_lossy();
+let count = folder.files.len();
 
-                if !others.is_empty() {
-                    ui.label("=");
-                    for other in others {
-                        let rel = other
-                            .strip_prefix(root)
-                            .unwrap_or(other)
-                            .to_string_lossy()
-                            .to_string();
-                        show_label(ui, &rel, other.parent().unwrap_or(other), other);
-                    }
+        let folder_key = folder.path.clone();
+        let is_expanded = expanded_folders.borrow().contains(&folder_key);
+
+        let header_text = if is_expanded {
+            format!("v ({}) {}", count, rel_path)
+        } else {
+            format!("> ({}) {}", count, rel_path)
+        };
+
+        let response = ui.add(egui::Label::new(header_text).sense(egui::Sense::click()));
+
+        if response.hovered() {
+            let rect = response.rect;
+            let pos = rect.right_bottom();
+            currently_hovered.borrow_mut().insert(folder_key.clone());
+            *hovered_folder.borrow_mut() = Some(folder_key.clone());
+            *hovered_folder_pos.borrow_mut() = pos;
+            let resp = response.clone();
+            resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        }
+
+        if response.clicked() {
+            let mut expanded = expanded_folders.borrow_mut();
+            if expanded.contains(&folder_key) {
+                expanded.remove(&folder_key);
+            } else {
+                expanded.insert(folder_key);
+            }
+        }
+
+        if is_expanded {
+            ui.indent(&rel_path, |ui| {
+                for (file, others) in &folder.files {
+                    let _file_name = file
+                        .file_name()
+                        .unwrap_or(file.as_os_str())
+                        .to_string_lossy();
+                    let dup_count = others.len() + 1;
+                    ui.horizontal(|ui| {
+                        let show_label =
+                            |ui: &mut egui::Ui, text: &str, open_path: &Path, id: &Path| {
+                                let was_hovered = hovered_files.borrow().contains(id);
+                                let mut rich = egui::RichText::new(text);
+                                if was_hovered {
+                                    rich = rich.underline();
+                                }
+                                let resp = ui.add(egui::Label::new(rich).sense(egui::Sense::click()));
+                                let clicked = resp.clicked();
+                                if resp.hovered() {
+                                    hovered_files.borrow_mut().insert(id.to_path_buf());
+                                    resp.on_hover_text("click to open the folder")
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                } else {
+                                    hovered_files.borrow_mut().remove(id);
+                                }
+                                if clicked {
+                                    let _ = open::that(open_path);
+                                }
+                            };
+
+                        ui.label(format!("({})", dup_count));
+
+                        let all_paths: Vec<_> = std::iter::once(file.clone())
+                            .chain(others.iter().cloned())
+                            .collect();
+
+                        for path in all_paths {
+                            let rel = path
+                                .strip_prefix(root)
+                                .unwrap_or(&path)
+                                .to_string_lossy()
+                                .to_string();
+                            show_label(ui, &rel, path.parent().unwrap_or(&path), &path);
+                        }
+                    });
                 }
             });
         }
-        for child in &node.children {
-            show_node(ui, child, root, hovered_files);
-        }
-    });
+    }
 }
 
 impl FindDuplicatesApp {
@@ -354,6 +442,7 @@ impl FindDuplicatesApp {
         self.root = path.clone();
         self.scan_progress = None;
         self.show_settings = false;
+        self.folder_info_cache.borrow_mut().clear();
 
         let (tx, rx) = mpsc::channel();
         self.scan_rx = Some(rx);
@@ -402,5 +491,46 @@ impl FindDuplicatesApp {
                 }
             }
         });
+    }
+
+    fn populate_folder_cache(&mut self, tree: &DirectoryNode) {
+        let mut cache: HashMap<PathBuf, Vec<(PathBuf, usize)>> = HashMap::new();
+
+        fn collect_folders_with_files(node: &DirectoryNode) -> Vec<&DirectoryNode> {
+            let mut folders = Vec::new();
+            if !node.files.is_empty() {
+                folders.push(node);
+            }
+            for child in &node.children {
+                folders.extend(collect_folders_with_files(child));
+            }
+            folders
+        }
+
+        let folders = collect_folders_with_files(tree);
+
+        for folder in folders {
+            let folder_path = folder.path.clone();
+            let mut folder_counts: HashMap<PathBuf, usize> = HashMap::new();
+
+            for (_file, others) in &folder.files {
+                for other in others {
+                    if let Some(parent) = other.parent() {
+                        if parent != folder_path {
+                            *folder_counts.entry(parent.to_path_buf()).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+
+            let mut sorted: Vec<_> = folder_counts.into_iter().collect();
+            sorted.sort_by(|a, b| b.1.cmp(&a.1));
+
+            if !sorted.is_empty() {
+                cache.insert(folder_path, sorted);
+            }
+        }
+
+        *self.folder_info_cache.borrow_mut() = cache;
     }
 }
