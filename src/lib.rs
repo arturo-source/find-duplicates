@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+use rayon::prelude::*;
 
 pub fn list_files_with_ignore(
     path: PathBuf,
@@ -31,70 +32,73 @@ fn get_duplicated_files_by_byte(
     quick_scan: bool,
     on_progress: &mut dyn FnMut(),
 ) -> Vec<Vec<PathBuf>> {
-    let mut hashes: Vec<u32> = Vec::new();
-    let mut valid_paths: Vec<PathBuf> = Vec::new();
-    let mut duplicated_files = Vec::new();
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    for path in &paths {
-        let mut file = match File::open(path) {
-            Ok(f) => f,
-            Err(err) => {
-                eprintln!("Warning: Could not open file ({}): {:?}", err, path);
-                continue;
-            }
-        };
-        let mut hasher = crc32fast::Hasher::new();
-        if quick_scan {
-            let mut buf = [0u8; 4096];
-            match file.read(&mut buf) {
-                Ok(_) => hasher.update(&buf),
+    let processed = AtomicUsize::new(0);
+    let results: Vec<(u32, PathBuf)> = paths
+        .par_iter()
+        .filter_map(|path| {
+            let mut file = match File::open(path) {
+                Ok(f) => f,
                 Err(err) => {
-                    eprintln!("Warning: Could not read file ({}): {:?}", err, path);
-                    continue;
+                    eprintln!("Warning: Could not open file ({}): {:?}", err, path);
+                    return None;
                 }
-            }
-        } else {
-            let mut buf = [0u8; 8192];
-            let mut success = true;
-            loop {
+            };
+            let mut hasher = crc32fast::Hasher::new();
+            if quick_scan {
+                let mut buf = [0u8; 4096];
                 match file.read(&mut buf) {
-                    Ok(0) => break,
                     Ok(n) => hasher.update(&buf[..n]),
                     Err(err) => {
                         eprintln!("Warning: Could not read file ({}): {:?}", err, path);
-                        success = false;
-                        break;
+                        return None;
+                    }
+                }
+            } else {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match file.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => hasher.update(&buf[..n]),
+                        Err(err) => {
+                            eprintln!("Warning: Could not read file ({}): {:?}", err, path);
+                            return None;
+                        }
                     }
                 }
             }
-            if !success {
-                continue;
-            }
-        }
-        hashes.push(hasher.finalize());
-        valid_paths.push(path.clone());
+            processed.fetch_add(1, Ordering::Relaxed);
+            Some((hasher.finalize(), path.clone()))
+        })
+        .collect();
+
+    let count = processed.load(Ordering::Relaxed);
+    for _ in 0..count {
         on_progress();
     }
 
-    let mut is_duplicated = vec![false; hashes.len()];
+    let mut sorted: Vec<(u32, PathBuf)> = results;
+    sorted.sort_unstable_by_key(|(hash, _)| *hash);
 
-    for (i, h1) in hashes.iter().enumerate() {
-        if is_duplicated[i] {
-            continue;
+    let mut duplicated_files = Vec::new();
+    let mut i = 0;
+    while i < sorted.len() {
+        let hash = sorted[i].0;
+        let mut j = i + 1;
+        while j < sorted.len() && sorted[j].0 == hash {
+            j += 1;
         }
 
-        let mut equal_files = vec![valid_paths[i].clone()];
-        for (j, h2) in hashes.iter().enumerate().skip(i + 1) {
-            if h1 == h2 {
-                is_duplicated[j] = true;
-                equal_files.push(valid_paths[j].clone());
+        if j - i > 1 {
+            let mut group = Vec::new();
+            for k in i..j {
+                group.push(sorted[k].1.clone());
             }
+            duplicated_files.push(group);
         }
 
-        if equal_files.len() > 1 {
-            is_duplicated[i] = true;
-            duplicated_files.push(equal_files);
-        }
+        i = j;
     }
 
     duplicated_files
