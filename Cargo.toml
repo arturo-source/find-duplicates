@@ -4,14 +4,15 @@ version = "0.2.0"
 edition = "2021"
 
 [dependencies]
-crc32fast = "1.5.0"
 dark-light = "2.0.0"
+dirs = "7.0.0"
 eframe = "0.34.1"
 egui = "0.34.1"
 open = "5.3.3"
 rayon = "1.10"
 rfd = "0.17.2"
 walkdir = "2.5.0"
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 
 [profile.release]
 strip = true
