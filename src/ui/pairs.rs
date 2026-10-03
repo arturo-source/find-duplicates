@@ -250,7 +250,7 @@ impl PairsView {
             paint_elided_start(
                 &painter,
                 Pos2::new(x + 16.0, y - 7.0),
-                &relative(&side.path, &scan.root),
+                &side_label(side, &scan.root),
                 FontId::monospace(11.5),
                 text,
                 max_w,
@@ -512,6 +512,16 @@ impl PairsView {
     }
 }
 
+/// Folder path relative to the scan root, noting a nested copy left out.
+fn side_label(side: &FolderSide, root: &std::path::Path) -> String {
+    let label = relative(&side.path, root);
+    if side.excluded.is_some() {
+        format!("{label} (without nested copy)")
+    } else {
+        label.into_owned()
+    }
+}
+
 fn side_card(ui: &mut Ui, scan: &ScanResult, tag: &str, side: &FolderSide, pal: &Palette) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -519,6 +529,12 @@ fn side_card(ui: &mut Ui, scan: &ScanResult, tag: &str, side: &FolderSide, pal: 
             ui.strong(tag);
             path_link(ui, &relative(&side.path, &scan.root), &side.path);
         });
+        if let Some(excluded) = &side.excluded {
+            ui.weak(format!(
+                "Without its nested copy {}",
+                relative(excluded, &side.path)
+            ));
+        }
         ui.horizontal(|ui| {
             ui.weak(format!(
                 "{} files · {}",
@@ -563,7 +579,7 @@ fn side_card(ui: &mut Ui, scan: &ScanResult, tag: &str, side: &FolderSide, pal: 
 fn verdict(ui: &mut Ui, pair: &FolderPair, pal: &Palette) {
     let (text, color) = match pair.relation() {
         Relation::Identical => (
-            format!("Both folders have exactly the same files. Deleting either frees {}.", format_bytes(pair.a.bytes)),
+            format!("Both folders have the same files. Deleting either frees {}.", format_bytes(pair.a.bytes)),
             pal.same,
         ),
         Relation::AInB => (

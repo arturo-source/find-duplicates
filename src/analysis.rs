@@ -24,6 +24,8 @@ const MIN_RATIO: f32 = 0.1;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Relation {
+    /// Every file of each folder exists in the other (extra copies of the
+    /// same file inside one folder don't count as a difference).
     Identical,
     /// Every file of A also exists somewhere in B.
     AInB,
@@ -34,7 +36,11 @@ pub enum Relation {
 #[derive(Clone, Debug)]
 pub struct FolderSide {
     pub path: PathBuf,
-    pub range: Range<usize>,
+    /// A copy nested inside this folder (e.g. `Docs/Backup/Docs` for
+    /// `Docs`), left out so the folder is not compared against itself.
+    pub excluded: Option<PathBuf>,
+    /// Index ranges into `ScanResult::files`.
+    pub ranges: Vec<Range<usize>>,
     pub bytes: u64,
     /// Files whose content also exists on the other side.
     pub shared_files: usize,
@@ -43,15 +49,18 @@ pub struct FolderSide {
 
 impl FolderSide {
     pub fn files(&self) -> usize {
-        self.range.len()
+        self.ranges.iter().map(|r| r.len()).sum()
+    }
+
+    pub fn indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.ranges.iter().flat_map(|r| r.clone())
     }
 
     /// Fraction of this folder's files found in the other folder.
     pub fn ratio(&self) -> f32 {
-        if self.range.is_empty() {
-            0.0
-        } else {
-            self.shared_files as f32 / self.range.len() as f32
+        match self.files() {
+            0 => 0.0,
+            n => self.shared_files as f32 / n as f32,
         }
     }
 
@@ -72,7 +81,7 @@ impl FolderPair {
         let a_full = self.a.shared_files == self.a.files();
         let b_full = self.b.shared_files == self.b.files();
         match (a_full, b_full) {
-            (true, true) if self.a.files() == self.b.files() => Relation::Identical,
+            (true, true) => Relation::Identical,
             (true, _) => Relation::AInB,
             (_, true) => Relation::BInA,
             _ => Relation::Similar,
@@ -133,20 +142,26 @@ fn strip_components(p: &Path, n: usize) -> Option<&Path> {
 }
 
 /// The two folders where a pair of identical files is rooted, or `None` if
-/// they share a folder or one root would contain the other.
+/// they share a folder.
+///
+/// Roots nested in one another are only accepted when they have the same
+/// name (a copy inside the original, like `Docs` and `Docs/Backup/Docs`);
+/// otherwise any folder with a loose file duplicated in a subfolder would
+/// pair with it.
 fn copy_roots<'a>(root: &Path, a: &'a Path, b: &'a Path) -> Option<(&'a Path, &'a Path)> {
     let k = common_suffix_len(a, b);
     // With suffix `Docs/a/x.pdf` (k=3) the roots are the `Docs` folders.
     for strip in (1..=k.saturating_sub(1).max(1)).rev() {
         let ra = strip_components(a, strip)?;
         let rb = strip_components(b, strip)?;
-        if !ra.starts_with(root) || !rb.starts_with(root) {
+        if !ra.starts_with(root) || !rb.starts_with(root) || ra == rb {
             continue;
         }
-        if ra.starts_with(rb) || rb.starts_with(ra) {
-            continue;
+        // strip < k means both roots end with the same folder name.
+        let nested = ra.starts_with(rb) || rb.starts_with(ra);
+        if !nested || strip < k {
+            return Some((ra, rb));
         }
-        return Some((ra, rb));
     }
     None
 }
@@ -184,39 +199,62 @@ fn vote(scan: &ScanResult) -> HashMap<(PathBuf, PathBuf), u32> {
         })
 }
 
+/// Index ranges of the files under `path`, minus those under `excluded`.
+fn side_ranges(scan: &ScanResult, path: &Path, excluded: Option<&Path>) -> Vec<Range<usize>> {
+    let range = scan.range_of(path);
+    match excluded {
+        Some(inner) => {
+            let skip = scan.range_of(inner);
+            vec![range.start..skip.start, skip.end..range.end]
+        }
+        None => vec![range],
+    }
+}
+
+fn contents(scan: &ScanResult, ranges: &[Range<usize>]) -> HashSet<u32> {
+    ranges
+        .iter()
+        .flat_map(|r| &scan.files[r.clone()])
+        .map(|f| f.content)
+        .collect()
+}
+
 fn measure_side(
     scan: &ScanResult,
     path: &Path,
-    range: Range<usize>,
+    excluded: Option<&Path>,
+    ranges: Vec<Range<usize>>,
     other: &HashSet<u32>,
 ) -> FolderSide {
-    let mut side = FolderSide {
-        path: path.to_path_buf(),
-        range: range.clone(),
-        bytes: 0,
-        shared_files: 0,
-        shared_bytes: 0,
-    };
-    for f in &scan.files[range] {
-        side.bytes += f.size;
+    let (mut bytes, mut shared_files, mut shared_bytes) = (0, 0, 0);
+    for f in ranges.iter().flat_map(|r| &scan.files[r.clone()]) {
+        bytes += f.size;
         if other.contains(&f.content) {
-            side.shared_files += 1;
-            side.shared_bytes += f.size;
+            shared_files += 1;
+            shared_bytes += f.size;
         }
     }
-    side
+    FolderSide {
+        path: path.to_path_buf(),
+        excluded: excluded.map(Path::to_path_buf),
+        ranges,
+        bytes,
+        shared_files,
+        shared_bytes,
+    }
 }
 
 pub fn measure_pair(scan: &ScanResult, a: &Path, b: &Path, votes: u32) -> FolderPair {
-    let ra = scan.range_of(a);
-    let rb = scan.range_of(b);
-    let set = |r: &Range<usize>| -> HashSet<u32> {
-        scan.files[r.clone()].iter().map(|f| f.content).collect()
-    };
-    let (set_a, set_b) = (set(&ra), set(&rb));
+    // When one folder holds a copy of itself, compare the outer one without it.
+    let a_excl = b.starts_with(a).then_some(b);
+    let b_excl = a.starts_with(b).then_some(a);
+    let (ra, rb) = (side_ranges(scan, a, a_excl), side_ranges(scan, b, b_excl));
+    let (set_a, set_b) = (contents(scan, &ra), contents(scan, &rb));
+    let a_side = measure_side(scan, a, a_excl, ra, &set_b);
+    let b_side = measure_side(scan, b, b_excl, rb, &set_a);
     let mut pair = FolderPair {
-        a: measure_side(scan, a, ra, &set_b),
-        b: measure_side(scan, b, rb, &set_a),
+        a: a_side,
+        b: b_side,
         votes,
     };
     // A is the likely redundant copy: the side most covered by the other,
@@ -345,20 +383,20 @@ pub struct CompareTree {
 
 impl CompareTree {
     pub fn build(scan: &ScanResult, pair: &FolderPair) -> Self {
-        let contents = |r: &Range<usize>| -> HashSet<u32> {
-            scan.files[r.clone()].iter().map(|f| f.content).collect()
-        };
-        let (in_a, in_b) = (contents(&pair.a.range), contents(&pair.b.range));
+        let (in_a, in_b) = (
+            contents(scan, &pair.a.ranges),
+            contents(scan, &pair.b.ranges),
+        );
 
         let mut by_rel: HashMap<&Path, (Option<usize>, Option<usize>)> = HashMap::new();
-        for i in pair.a.range.clone() {
+        for i in pair.a.indices() {
             let rel = scan.files[i]
                 .path
                 .strip_prefix(&pair.a.path)
                 .unwrap_or(&scan.files[i].path);
             by_rel.entry(rel).or_default().0 = Some(i);
         }
-        for i in pair.b.range.clone() {
+        for i in pair.b.indices() {
             let rel = scan.files[i]
                 .path
                 .strip_prefix(&pair.b.path)
@@ -520,9 +558,20 @@ mod tests {
         let (a, b) = copy_roots(root, Path::new("/d/x/f.txt"), Path::new("/d/y/g.txt")).unwrap();
         assert_eq!((a, b), (Path::new("/d/x"), Path::new("/d/y")));
 
-        // Same folder or nested folders are not copy roots.
+        // A copy inside the original keeps the folder name.
+        let (a, b) = copy_roots(
+            root,
+            Path::new("/d/Docs/a/x.pdf"),
+            Path::new("/d/Docs/Backup/Docs/a/x.pdf"),
+        )
+        .unwrap();
+        assert_eq!(a, Path::new("/d/Docs"));
+        assert_eq!(b, Path::new("/d/Docs/Backup/Docs"));
+
+        // Same folder, or nested folders with different names, are not copy roots.
         assert!(copy_roots(root, Path::new("/d/x/f"), Path::new("/d/x/g")).is_none());
         assert!(copy_roots(root, Path::new("/d/f"), Path::new("/d/sub/g")).is_none());
+        assert!(copy_roots(root, Path::new("/d/f"), Path::new("/d/sub/f")).is_none());
     }
 
     #[test]
@@ -668,5 +717,69 @@ mod tests {
         let dir = tree.nodes[0].children[0];
         assert!(tree.nodes[dir].is_dir());
         assert_eq!(tree.nodes[dir].counts.same, 1);
+    }
+
+    #[test]
+    fn backup_nested_inside_the_original() {
+        let fs = MemFs::new()
+            .file("Docs/a.txt", "alpha")
+            .file("Docs/sub/b.txt", "beta")
+            .file("Docs/notes.txt", "written after the backup")
+            .file("Docs/Backup/Docs/a.txt", "alpha")
+            .file("Docs/Backup/Docs/sub/b.txt", "beta");
+        let scan = scan_mem(&fs);
+        let pairs = find_folder_pairs(&scan);
+        let p = find(&pairs, "Docs", "Docs/Backup/Docs");
+
+        // The backup is A and fully contained; Docs is measured without it.
+        assert_eq!(p.relation(), Relation::AInB);
+        assert_eq!(p.a.path, MemFs::path("Docs/Backup/Docs"));
+        assert_eq!(p.a.excluded, None);
+        assert_eq!(p.b.excluded, Some(MemFs::path("Docs/Backup/Docs")));
+        assert_eq!(p.b.files(), 3);
+        assert_eq!(p.b.unique_files(), 1);
+
+        let tree = CompareTree::build(&scan, p);
+        assert!(!tree.nodes.iter().any(|n| n.name == "Backup"));
+        let notes = tree.nodes.iter().find(|n| n.name == "notes.txt").unwrap();
+        assert_eq!(notes.status, Some(FileStatus::UniqueB));
+    }
+
+    #[test]
+    fn identical_nested_backup() {
+        let fs = MemFs::new()
+            .file("Fotos/1.jpg", "one")
+            .file("Fotos/2.jpg", "two")
+            .file("Fotos/copia/Fotos/1.jpg", "one")
+            .file("Fotos/copia/Fotos/2.jpg", "two");
+        let pairs = find_folder_pairs(&scan_mem(&fs));
+        assert_eq!(pairs.len(), 1, "{pairs:#?}");
+        let p = find(&pairs, "Fotos", "Fotos/copia/Fotos");
+        assert_eq!(p.relation(), Relation::Identical);
+        assert_eq!(p.a.path, MemFs::path("Fotos/copia/Fotos"));
+    }
+
+    #[test]
+    fn loose_file_copied_into_subfolder_is_not_a_pair() {
+        let mut fs = MemFs::new()
+            .file("Project/logo.png", "logo")
+            .file("Project/assets/logo.png", "logo");
+        for i in 0..5 {
+            fs.write(&format!("Project/src/{i}.rs"), format!("code {i}"));
+            fs.write(&format!("Project/assets/{i}.svg"), format!("icon {i}"));
+        }
+        assert!(find_folder_pairs(&scan_mem(&fs)).is_empty());
+    }
+
+    #[test]
+    fn extra_copies_inside_one_side_are_still_identical() {
+        let fs = MemFs::new()
+            .file("a/1.txt", "one")
+            .file("a/2.txt", "two")
+            .file("b/1.txt", "one")
+            .file("b/2.txt", "two")
+            .file("b/2 (copy).txt", "two");
+        let pairs = find_folder_pairs(&scan_mem(&fs));
+        assert_eq!(find(&pairs, "a", "b").relation(), Relation::Identical);
     }
 }
