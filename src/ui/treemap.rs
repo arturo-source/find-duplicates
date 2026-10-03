@@ -191,12 +191,21 @@ impl TreemapView {
         });
         ui.horizontal(|ui| {
             ui.small("Duplicated content:");
-            for (ratio, label) in [(0.0, "0%"), (0.5, "50%"), (1.0, "100%")] {
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 10.0), Sense::hover());
+            ui.small("0%");
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(120.0, 10.0), Sense::hover());
+            // One 1px slice per step so the bar matches `heat` exactly.
+            let steps = rect.width() as usize;
+            for i in 0..steps {
+                let x = rect.left() + i as f32;
+                let slice = Rect::from_min_max(
+                    Pos2::new(x, rect.top()),
+                    Pos2::new(x + 1.0, rect.bottom()),
+                );
+                let t = i as f32 / (steps - 1) as f32;
                 ui.painter()
-                    .rect_filled(rect, 2.0, heat(ratio, ui.visuals().dark_mode));
-                ui.small(label);
+                    .rect_filled(slice, 0.0, heat(t, ui.visuals().dark_mode));
             }
+            ui.small("100%");
             ui.small(" · click a folder to zoom in, right-click to go up");
         });
         ui.separator();
@@ -298,9 +307,9 @@ impl TreemapView {
 
 fn heat(ratio: f32, dark: bool) -> Color32 {
     let (cold, hot) = if dark {
-        ([52.0, 78.0, 92.0], [160.0, 72.0, 64.0])
+        ([62.0, 62.0, 66.0], [196.0, 88.0, 46.0])
     } else {
-        ([170.0, 205.0, 215.0], [235.0, 120.0, 105.0])
+        ([214.0, 214.0, 218.0], [234.0, 112.0, 56.0])
     };
     let t = ratio.clamp(0.0, 1.0);
     let c = |i: usize| (cold[i] + (hot[i] - cold[i]) * t) as u8;
