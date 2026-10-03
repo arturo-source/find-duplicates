@@ -475,23 +475,34 @@ impl CompareTree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scan::{scan, Progress, ScanOptions};
-    use std::fs;
+    use crate::cache::HashCache;
+    use crate::fs::mem::MemFs;
+    use crate::scan::{scan_with, Progress, ScanOptions};
 
-    fn write(root: &Path, rel: &str, content: &str) {
-        let p = root.join(rel);
-        fs::create_dir_all(p.parent().unwrap()).unwrap();
-        fs::write(p, content).unwrap();
-    }
-
-    fn scan_dir(root: &Path) -> ScanResult {
+    fn scan_mem(fs: &MemFs) -> ScanResult {
         let opts = ScanOptions {
             ignore: HashSet::new(),
             min_size: 0,
             quick_scan: false,
             cache_path: None,
         };
-        scan(root, &opts, &Progress::default()).unwrap()
+        scan_with(
+            fs,
+            &MemFs::root(),
+            &opts,
+            &mut HashCache::default(),
+            &Progress::default(),
+        )
+        .unwrap()
+    }
+
+    /// Finds the pair made of `x` and `y` in either order.
+    fn find<'a>(pairs: &'a [FolderPair], x: &str, y: &str) -> &'a FolderPair {
+        let (x, y) = (MemFs::path(x), MemFs::path(y));
+        pairs
+            .iter()
+            .find(|p| (p.a.path == x && p.b.path == y) || (p.a.path == y && p.b.path == x))
+            .unwrap_or_else(|| panic!("pair {x:?} / {y:?} not found in {pairs:#?}"))
     }
 
     #[test]
@@ -515,63 +526,147 @@ mod tests {
     }
 
     #[test]
-    fn detects_identical_contained_and_similar() {
-        let dir = std::env::temp_dir().join(format!("fd-analysis-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        // Docs and Backup/PC/Docs are identical.
+    fn identical_folders_hide_their_subfolders() {
+        let mut fs = MemFs::new();
         for root in ["Docs", "Backup/PC/Docs"] {
-            write(&dir, &format!("{root}/a.txt"), "alpha");
-            write(&dir, &format!("{root}/sub/b.txt"), "beta");
+            fs.write(&format!("{root}/a.txt"), "alpha");
+            fs.write(&format!("{root}/sub/b.txt"), "beta");
         }
-        // Old/Music is contained in Music.
-        write(&dir, "Music/1.mp3", "one");
-        write(&dir, "Music/2.mp3", "two");
-        write(&dir, "Old/Music/1.mp3", "one");
-        // Photos and USB/Photos share 2 of 3 files each.
-        write(&dir, "Photos/p1.jpg", "p1");
-        write(&dir, "Photos/p2.jpg", "p2");
-        write(&dir, "Photos/p3.jpg", "p3");
-        write(&dir, "USB/Photos/p1.jpg", "p1");
-        write(&dir, "USB/Photos/p2.jpg", "p2");
-        write(&dir, "USB/Photos/p4.jpg", "p4");
+        let pairs = find_folder_pairs(&scan_mem(&fs));
+        assert_eq!(pairs.len(), 1, "{pairs:#?}");
+        let p = find(&pairs, "Docs", "Backup/PC/Docs");
+        assert_eq!(p.relation(), Relation::Identical);
+        // On a tie the more nested folder is the redundant copy.
+        assert_eq!(p.a.path, MemFs::path("Backup/PC/Docs"));
+    }
 
-        let scan = scan_dir(&dir);
-        let pairs = find_folder_pairs(&scan);
-        let find = |x: &str, y: &str| {
-            pairs
-                .iter()
-                .find(|p| {
-                    let (a, b) = (dir.join(x), dir.join(y));
-                    (p.a.path == a && p.b.path == b) || (p.a.path == b && p.b.path == a)
-                })
-                .unwrap_or_else(|| panic!("pair {x} / {y} not found in {pairs:#?}"))
-        };
+    #[test]
+    fn contained_folder_is_side_a() {
+        let fs = MemFs::new()
+            .file("Music/1.mp3", "one")
+            .file("Music/2.mp3", "two")
+            .file("Old/Music/1.mp3", "one");
+        let pairs = find_folder_pairs(&scan_mem(&fs));
+        let p = find(&pairs, "Music", "Old/Music");
+        assert_eq!(p.relation(), Relation::AInB);
+        assert_eq!(p.a.path, MemFs::path("Old/Music"));
+        assert_eq!(p.a.ratio(), 1.0);
+        assert_eq!(p.b.ratio(), 0.5);
+        assert_eq!(p.reclaimable(), 3);
+    }
 
+    #[test]
+    fn similar_folders_report_ratio_per_side() {
+        let fs = MemFs::new()
+            .file("Photos/p1.jpg", "p1")
+            .file("Photos/p2.jpg", "p2")
+            .file("Photos/p3.jpg", "p3")
+            .file("USB/Photos/p1.jpg", "p1")
+            .file("USB/Photos/p2.jpg", "p2")
+            .file("USB/Photos/p4.jpg", "p4")
+            .file("USB/Photos/p5.jpg", "p5");
+        let pairs = find_folder_pairs(&scan_mem(&fs));
+        let p = find(&pairs, "Photos", "USB/Photos");
+        assert_eq!(p.relation(), Relation::Similar);
+        assert_eq!(p.a.path, MemFs::path("Photos"));
+        assert!((p.a.ratio() - 2.0 / 3.0).abs() < 1e-6);
+        assert!((p.b.ratio() - 0.5).abs() < 1e-6);
+        assert_eq!(p.a.unique_files(), 1);
+        assert_eq!(p.b.unique_files(), 2);
+    }
+
+    #[test]
+    fn coincidental_overlap_is_not_a_pair() {
+        let mut fs = MemFs::new();
+        for i in 0..20 {
+            fs.write(&format!("x/{i}.txt"), format!("x-{i:03}"));
+            fs.write(&format!("y/{i}.txt"), format!("y-{i:03}"));
+        }
+        fs.write("x/common.bin", "shared");
+        fs.write("y/common.bin", "shared");
+        assert!(find_folder_pairs(&scan_mem(&fs)).is_empty());
+    }
+
+    #[test]
+    fn renamed_copy_root_is_found() {
+        // The photos were copied into a folder with a different name.
+        let mut fs = MemFs::new();
+        for i in 0..5 {
+            fs.write(&format!("Fotos/2016/IMG_{i}.jpg"), format!("img{i}"));
+            fs.write(
+                &format!("Externo/Vacaciones/IMG_{i}.jpg"),
+                format!("img{i}"),
+            );
+        }
+        let pairs = find_folder_pairs(&scan_mem(&fs));
         assert_eq!(
-            find("Docs", "Backup/PC/Docs").relation(),
+            find(&pairs, "Fotos/2016", "Externo/Vacaciones").relation(),
             Relation::Identical
         );
-        // The identical subfolder `sub` is covered by its parent pair.
-        assert!(!pairs.iter().any(|p| p.a.path.ends_with("Docs/sub")));
+    }
 
-        let music = find("Music", "Old/Music");
-        let old = if music.a.path.ends_with("Old/Music") {
-            &music.a
-        } else {
-            &music.b
+    #[test]
+    fn compare_tree_classifies_every_file() {
+        let fs = MemFs::new()
+            .file("p/a.txt", "1")
+            .file("p/b.txt", "2")
+            .file("p/c.txt", "3")
+            .file("q/a.txt", "1")
+            .file("q/b.txt", "X")
+            .file("q/renamed.txt", "3")
+            .file("q/d.txt", "4");
+        let scan = scan_mem(&fs);
+        let pairs = find_folder_pairs(&scan);
+        let pair = find(&pairs, "p", "q");
+        assert_eq!(pair.a.path, MemFs::path("p"));
+        let tree = CompareTree::build(&scan, pair);
+
+        let status = |name: &str| {
+            tree.nodes
+                .iter()
+                .find(|n| n.name == name)
+                .and_then(|n| n.status)
+                .unwrap_or_else(|| panic!("{name} not in tree"))
         };
-        assert_eq!(old.ratio(), 1.0);
-        assert!(matches!(music.relation(), Relation::AInB | Relation::BInA));
+        assert_eq!(status("a.txt"), FileStatus::Same);
+        assert_eq!(status("b.txt"), FileStatus::Modified);
+        assert_eq!(status("c.txt"), FileStatus::MovedA);
+        assert_eq!(status("renamed.txt"), FileStatus::MovedB);
+        assert_eq!(status("d.txt"), FileStatus::UniqueB);
 
-        let photos = find("Photos", "USB/Photos");
-        assert_eq!(photos.relation(), Relation::Similar);
-        assert!((photos.a.ratio() - 2.0 / 3.0).abs() < 1e-6);
+        let root = tree.nodes[0].counts;
+        assert_eq!(
+            root,
+            StatusCounts {
+                same: 1,
+                modified: 1,
+                moved_a: 1,
+                moved_b: 1,
+                unique_a: 0,
+                unique_b: 1,
+            }
+        );
+        assert_eq!(root.differences(), 4);
+    }
 
-        let tree = CompareTree::build(&scan, photos);
-        let root = &tree.nodes[0];
-        assert_eq!(root.counts.same, 2);
-        assert_eq!(root.counts.unique_a + root.counts.unique_b, 2);
-
-        let _ = fs::remove_dir_all(dir);
+    #[test]
+    fn compare_tree_nests_directories_first() {
+        let fs = MemFs::new()
+            .file("p/z.txt", "1")
+            .file("p/dir/a.txt", "2")
+            .file("q/z.txt", "1")
+            .file("q/dir/a.txt", "2");
+        let scan = scan_mem(&fs);
+        let pairs = find_folder_pairs(&scan);
+        let tree = CompareTree::build(&scan, find(&pairs, "p", "q"));
+        let names: Vec<_> = tree.nodes[0]
+            .children
+            .iter()
+            .map(|&c| tree.nodes[c].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["dir", "z.txt"]);
+        let dir = tree.nodes[0].children[0];
+        assert!(tree.nodes[dir].is_dir());
+        assert_eq!(tree.nodes[dir].counts.same, 1);
     }
 }

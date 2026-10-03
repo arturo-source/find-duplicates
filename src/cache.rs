@@ -32,11 +32,12 @@ impl HashCache {
 
     /// Loads the cache, returning an empty one if the file is missing or corrupt.
     pub fn load(path: &Path) -> Self {
-        Self::try_load(path).unwrap_or_default()
+        File::open(path)
+            .and_then(|f| Self::read_from(BufReader::new(f)))
+            .unwrap_or_default()
     }
 
-    fn try_load(path: &Path) -> io::Result<Self> {
-        let mut r = BufReader::new(File::open(path)?);
+    pub fn read_from(mut r: impl Read) -> io::Result<Self> {
         let mut magic = [0u8; 4];
         r.read_exact(&mut magic)?;
         if &magic != MAGIC || read_u32(&mut r)? != VERSION {
@@ -79,8 +80,12 @@ impl HashCache {
             fs::create_dir_all(dir)?;
         }
         let tmp = path.with_extension("tmp");
+        self.write_to(BufWriter::new(File::create(&tmp)?))?;
+        fs::rename(tmp, path)
+    }
+
+    pub fn write_to(&self, mut w: impl Write) -> io::Result<()> {
         {
-            let mut w = BufWriter::new(File::create(&tmp)?);
             w.write_all(MAGIC)?;
             w.write_all(&VERSION.to_le_bytes())?;
             let encoded: Vec<_> = self
@@ -100,7 +105,7 @@ impl HashCache {
             }
             w.flush()?;
         }
-        fs::rename(tmp, path)
+        Ok(())
     }
 
     /// Returns the entry only if it is still valid for the given size/mtime.
@@ -169,26 +174,73 @@ fn path_from_bytes(b: Vec<u8>) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    const E: CacheEntry = CacheEntry {
+        size: 10,
+        mtime: 5,
+        quick: 1,
+        full: Some(2),
+    };
+
+    fn roundtrip(cache: &HashCache) -> HashCache {
+        let mut buf = Vec::new();
+        cache.write_to(&mut buf).unwrap();
+        HashCache::read_from(buf.as_slice()).unwrap()
+    }
+
     #[test]
     fn roundtrip_and_invalidation() {
-        let dir = std::env::temp_dir().join(format!("fd-cache-test-{}", std::process::id()));
-        let file = dir.join("hashes.bin");
         let mut cache = HashCache::default();
-        let e = CacheEntry {
-            size: 10,
-            mtime: 5,
-            quick: 1,
-            full: Some(2),
-        };
-        cache.insert(PathBuf::from("/a/b"), e);
-        cache.insert(PathBuf::from("/a/c"), CacheEntry { full: None, ..e });
-        cache.save(&file).unwrap();
+        cache.insert(PathBuf::from("/a/b"), E);
+        cache.insert(PathBuf::from("/a/c"), CacheEntry { full: None, ..E });
 
-        let loaded = HashCache::load(&file);
+        let loaded = roundtrip(&cache);
         assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded.get(Path::new("/a/b"), 10, 5), Some(e));
+        assert_eq!(loaded.get(Path::new("/a/b"), 10, 5), Some(E));
         assert_eq!(loaded.get(Path::new("/a/c"), 10, 5).unwrap().full, None);
+        // A changed mtime or size invalidates the entry.
         assert_eq!(loaded.get(Path::new("/a/b"), 10, 6), None);
-        let _ = fs::remove_dir_all(dir);
+        assert_eq!(loaded.get(Path::new("/a/b"), 11, 5), None);
+    }
+
+    #[test]
+    fn non_ascii_paths_survive() {
+        let mut cache = HashCache::default();
+        cache.insert(PathBuf::from("/fotos/año 2015/canción ñ.mp3"), E);
+        let loaded = roundtrip(&cache);
+        assert_eq!(
+            loaded.get(Path::new("/fotos/año 2015/canción ñ.mp3"), 10, 5),
+            Some(E)
+        );
+    }
+
+    #[test]
+    fn rejects_corrupt_data() {
+        assert!(HashCache::read_from(&b"NOPE\x01\0\0\0"[..]).is_err());
+        assert!(HashCache::read_from(&b""[..]).is_err());
+
+        let mut cache = HashCache::default();
+        cache.insert(PathBuf::from("/a/b"), E);
+        let mut buf = Vec::new();
+        cache.write_to(&mut buf).unwrap();
+        buf.truncate(buf.len() - 3);
+        assert!(HashCache::read_from(buf.as_slice()).is_err());
+    }
+
+    #[test]
+    fn load_missing_file_is_empty() {
+        assert!(HashCache::load(Path::new("/nonexistent/find-duplicates/hashes.bin")).is_empty());
+    }
+
+    #[test]
+    fn prune_only_touches_scanned_root() {
+        let mut cache = HashCache::default();
+        for p in ["/disk/kept", "/disk/deleted", "/other/untouched"] {
+            cache.insert(PathBuf::from(p), E);
+        }
+        let seen: HashSet<&Path> = [Path::new("/disk/kept")].into_iter().collect();
+        cache.prune(Path::new("/disk"), &seen);
+        assert!(cache.get(Path::new("/disk/kept"), 10, 5).is_some());
+        assert!(cache.get(Path::new("/disk/deleted"), 10, 5).is_none());
+        assert!(cache.get(Path::new("/other/untouched"), 10, 5).is_some());
     }
 }

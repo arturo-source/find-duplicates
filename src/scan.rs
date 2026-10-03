@@ -6,17 +6,15 @@
 //! reused from [`HashCache`] when size and mtime are unchanged.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::time::UNIX_EPOCH;
 
 use rayon::prelude::*;
-use walkdir::WalkDir;
 use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 
 use crate::cache::{CacheEntry, HashCache};
+use crate::fs::{FileSystem, ReadSeek, RealFs};
 
 /// Files up to this size are hashed whole in the quick pass.
 const QUICK_WHOLE_LIMIT: u64 = 8192;
@@ -132,46 +130,32 @@ impl ScanResult {
 }
 
 pub fn list_files(
+    fs: &dyn FileSystem,
     root: &Path,
     ignore: &HashSet<String>,
     min_size: u64,
     progress: &Progress,
 ) -> Vec<FileEntry> {
     let mut files = Vec::new();
-    let walker = WalkDir::new(root).into_iter().filter_entry(|e| {
-        e.file_name()
-            .to_str()
-            .is_none_or(|name| !ignore.contains(name))
-    });
-    for entry in walker.filter_map(|e| e.ok()) {
+    fs.walk(root, ignore, &mut |meta| {
         if progress.cancelled() {
-            break;
+            return false;
         }
-        if !entry.file_type().is_file() {
-            continue;
+        if meta.size >= min_size {
+            files.push(FileEntry {
+                path: meta.path,
+                size: meta.size,
+                mtime: meta.mtime,
+                content: u32::MAX,
+            });
+            progress.done.fetch_add(1, Ordering::Relaxed);
         }
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.len() < min_size {
-            continue;
-        }
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        files.push(FileEntry {
-            path: entry.into_path(),
-            size: meta.len(),
-            mtime,
-            content: u32::MAX,
-        });
-        progress.done.fetch_add(1, Ordering::Relaxed);
-    }
+        true
+    });
     files
 }
 
-fn read_up_to(file: &mut File, buf: &mut [u8]) -> io::Result<usize> {
+fn read_up_to(file: &mut dyn Read, buf: &mut [u8]) -> io::Result<usize> {
     let mut n = 0;
     while n < buf.len() {
         match file.read(&mut buf[n..])? {
@@ -183,22 +167,20 @@ fn read_up_to(file: &mut File, buf: &mut [u8]) -> io::Result<usize> {
 }
 
 /// Whole file for small files, first + last 4 KiB otherwise.
-pub fn quick_hash(path: &Path, size: u64) -> io::Result<u64> {
-    let mut file = File::open(path)?;
+pub fn quick_hash(file: &mut dyn ReadSeek, size: u64) -> io::Result<u64> {
     if size <= QUICK_WHOLE_LIMIT {
         let mut buf = vec![0u8; size as usize];
-        let n = read_up_to(&mut file, &mut buf)?;
+        let n = read_up_to(file, &mut buf)?;
         return Ok(xxh3_64(&buf[..n]));
     }
     let mut buf = [0u8; QUICK_CHUNK * 2];
-    let head = read_up_to(&mut file, &mut buf[..QUICK_CHUNK])?;
+    let head = read_up_to(file, &mut buf[..QUICK_CHUNK])?;
     file.seek(SeekFrom::End(-(QUICK_CHUNK as i64)))?;
-    let tail = read_up_to(&mut file, &mut buf[head..])?;
+    let tail = read_up_to(file, &mut buf[head..])?;
     Ok(xxh3_64(&buf[..head + tail]))
 }
 
-pub fn full_hash(path: &Path, progress: Option<&Progress>) -> io::Result<u64> {
-    let mut file = File::open(path)?;
+pub fn full_hash(file: &mut dyn Read, progress: Option<&Progress>) -> io::Result<u64> {
     let mut hasher = Xxh3::new();
     let mut buf = vec![0u8; 256 * 1024];
     loop {
@@ -227,19 +209,36 @@ fn group_indices<K: std::hash::Hash + Eq>(
     map.into_values().filter(|v| v.len() > 1)
 }
 
+/// Scans the real disk, loading and saving the hash cache at `opts.cache_path`.
 pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> Option<ScanResult> {
-    progress.set_stage(Stage::Listing, 0);
-    let mut files = list_files(root, &opts.ignore, opts.min_size, progress);
-    if progress.cancelled() {
-        return None;
-    }
-    files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-
     let mut cache = opts
         .cache_path
         .as_deref()
         .map(HashCache::load)
         .unwrap_or_default();
+    let result = scan_with(&RealFs, root, opts, &mut cache, progress)?;
+    if let Some(path) = &opts.cache_path {
+        if let Err(err) = cache.save(path) {
+            eprintln!("Warning: could not save hash cache ({err}): {path:?}");
+        }
+    }
+    Some(result)
+}
+
+/// Scans `fs`, reusing hashes from `cache` and storing the new ones in it.
+pub fn scan_with(
+    fs: &dyn FileSystem,
+    root: &Path,
+    opts: &ScanOptions,
+    cache: &mut HashCache,
+    progress: &Progress,
+) -> Option<ScanResult> {
+    progress.set_stage(Stage::Listing, 0);
+    let mut files = list_files(fs, root, &opts.ignore, opts.min_size, progress);
+    if progress.cancelled() {
+        return None;
+    }
+    files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
     let mut cache_hits = 0usize;
 
     // Quick pass on files whose size is shared with some other file.
@@ -257,7 +256,10 @@ pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> Option<Scan
             } else if progress.cancelled() {
                 (i, None, false)
             } else {
-                let entry = quick_hash(&f.path, f.size).ok().map(|q| CacheEntry {
+                let hash = fs
+                    .open(&f.path)
+                    .and_then(|mut r| quick_hash(&mut r, f.size));
+                let entry = hash.ok().map(|q| CacheEntry {
                     size: f.size,
                     mtime: f.mtime,
                     quick: q,
@@ -295,7 +297,12 @@ pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> Option<Scan
         progress.set_stage(Stage::FullHash, total_bytes);
         let fulls: Vec<(usize, Option<u64>)> = need_full
             .par_iter()
-            .map(|&i| (i, full_hash(&files[i].path, Some(progress)).ok()))
+            .map(|&i| {
+                let hash = fs
+                    .open(&files[i].path)
+                    .and_then(|mut r| full_hash(&mut r, Some(progress)));
+                (i, hash.ok())
+            })
             .collect();
         if progress.cancelled() {
             return None;
@@ -344,16 +351,11 @@ pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> Option<Scan
     }
     let groups = by_content.into_values().collect();
 
-    if let Some(path) = &opts.cache_path {
-        for (i, e) in entries {
-            cache.insert(files[i].path.clone(), e);
-        }
-        let seen: HashSet<&Path> = files.iter().map(|f| f.path.as_path()).collect();
-        cache.prune(root, &seen);
-        if let Err(err) = cache.save(path) {
-            eprintln!("Warning: could not save hash cache ({err}): {path:?}");
-        }
+    for (i, e) in entries {
+        cache.insert(files[i].path.clone(), e);
     }
+    let seen: HashSet<&Path> = files.iter().map(|f| f.path.as_path()).collect();
+    cache.prune(root, &seen);
 
     Some(ScanResult {
         root: root.to_path_buf(),
@@ -362,4 +364,200 @@ pub fn scan(root: &Path, opts: &ScanOptions, progress: &Progress) -> Option<Scan
         groups,
         cache_hits,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::mem::MemFs;
+
+    fn opts(quick_scan: bool) -> ScanOptions {
+        ScanOptions {
+            ignore: HashSet::new(),
+            min_size: 0,
+            quick_scan,
+            cache_path: None,
+        }
+    }
+
+    fn run_with(fs: &MemFs, opts: &ScanOptions, cache: &mut HashCache) -> ScanResult {
+        scan_with(fs, &MemFs::root(), opts, cache, &Progress::default()).unwrap()
+    }
+
+    fn run(fs: &MemFs, opts: &ScanOptions) -> ScanResult {
+        run_with(fs, opts, &mut HashCache::default())
+    }
+
+    /// Duplicate groups as sorted relative paths, for easy comparison.
+    fn groups(r: &ScanResult) -> Vec<Vec<String>> {
+        let mut out: Vec<Vec<String>> = r
+            .groups
+            .iter()
+            .map(|g| {
+                let mut v: Vec<String> = g
+                    .iter()
+                    .map(|&i| {
+                        let p = r.files[i].path.strip_prefix(&r.root).unwrap();
+                        p.to_string_lossy().into_owned()
+                    })
+                    .collect();
+                v.sort();
+                v
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// `len` bytes where only the middle byte depends on `middle`, so the
+    /// first and last 4 KiB are the same for any `middle`.
+    fn big(len: usize, middle: u8) -> Vec<u8> {
+        let mut v: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        v[len / 2] = middle;
+        v
+    }
+
+    #[test]
+    fn groups_identical_files() {
+        let fs = MemFs::new()
+            .file("a.txt", "hello")
+            .file("sub/c.txt", "hello")
+            .file("d.txt", "world")
+            .file("e.txt", "a different size");
+        let r = run(&fs, &opts(false));
+        assert_eq!(groups(&r), vec![vec!["a.txt", "sub/c.txt"]]);
+        assert_eq!(r.files.len(), 4);
+        assert_eq!(r.wasted_bytes(), 5);
+    }
+
+    #[test]
+    fn unique_sizes_are_never_read() {
+        let fs = MemFs::new().file("a", "1").file("b", "22").file("c", "333");
+        let r = run(&fs, &opts(false));
+        assert!(r.groups.is_empty());
+        assert_eq!(fs.opens(), 0);
+    }
+
+    #[test]
+    fn quick_scan_only_compares_head_and_tail() {
+        let fs = MemFs::new()
+            .file("x.bin", big(20_000, 1))
+            .file("y.bin", big(20_000, 2));
+        // Same size, head and tail: quick scan reports a (false) duplicate…
+        assert_eq!(groups(&run(&fs, &opts(true))).len(), 1);
+        // …and the full content check rejects it.
+        assert!(run(&fs, &opts(false)).groups.is_empty());
+    }
+
+    #[test]
+    fn large_identical_files_are_verified() {
+        let fs = MemFs::new()
+            .file("x.bin", big(50_000, 7))
+            .file("copy/x.bin", big(50_000, 7));
+        assert_eq!(
+            groups(&run(&fs, &opts(false))),
+            vec![vec!["copy/x.bin", "x.bin"]]
+        );
+    }
+
+    #[test]
+    fn min_size_and_ignore_patterns() {
+        let fs = MemFs::new()
+            .file("small1", "ab")
+            .file("small2", "ab")
+            .file("big1", "abcdef")
+            .file("big2", "abcdef")
+            .file("node_modules/big3", "abcdef")
+            .file("x/node_modules/y/big4", "abcdef");
+        let opts = ScanOptions {
+            ignore: ["node_modules".to_string()].into_iter().collect(),
+            min_size: 4,
+            ..opts(false)
+        };
+        assert_eq!(groups(&run(&fs, &opts)), vec![vec!["big1", "big2"]]);
+    }
+
+    #[test]
+    fn cache_avoids_rereading_unchanged_files() {
+        let mut fs = MemFs::new()
+            .file("a", "same")
+            .file("b", "same")
+            .file("c", big(20_000, 1))
+            .file("d", big(20_000, 1));
+        let mut cache = HashCache::default();
+        let first = run_with(&fs, &opts(false), &mut cache);
+        assert_eq!(first.cache_hits, 0);
+        let opens = fs.opens();
+        assert!(opens >= 4);
+
+        let second = run_with(&fs, &opts(false), &mut cache);
+        assert_eq!(fs.opens(), opens, "nothing should be read again");
+        assert_eq!(second.cache_hits, 4);
+        assert_eq!(groups(&second), groups(&first));
+
+        // Rewriting a file bumps its mtime, so only that one is hashed again.
+        fs.write("b", "diff");
+        let third = run_with(&fs, &opts(false), &mut cache);
+        assert_eq!(fs.opens(), opens + 1);
+        assert_eq!(third.cache_hits, 3);
+        assert_eq!(groups(&third), vec![vec!["c", "d"]]);
+    }
+
+    #[test]
+    fn cache_forgets_deleted_files() {
+        let fs = MemFs::new().file("a", "same").file("b", "same");
+        let mut cache = HashCache::default();
+        run_with(&fs, &opts(false), &mut cache);
+        assert_eq!(cache.len(), 2);
+        run_with(&MemFs::new().file("a", "same"), &opts(false), &mut cache);
+        // `a` still exists, so its hash is kept for future scans.
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get(&MemFs::path("b"), 4, 1).is_none());
+    }
+
+    #[test]
+    fn unreadable_files_are_treated_as_unique() {
+        let fs = MemFs::new()
+            .file("a", "same")
+            .unreadable("b", "same")
+            .file("c", "same");
+        assert_eq!(groups(&run(&fs, &opts(false))), vec![vec!["a", "c"]]);
+    }
+
+    #[test]
+    fn cancelled_scan_returns_none() {
+        let fs = MemFs::new().file("a", "same").file("b", "same");
+        let progress = Progress::default();
+        progress.cancel.store(true, Ordering::Relaxed);
+        let res = scan_with(
+            &fs,
+            &MemFs::root(),
+            &opts(false),
+            &mut HashCache::default(),
+            &progress,
+        );
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn range_of_covers_exactly_the_folder() {
+        let fs = MemFs::new()
+            .file("a/x", "1")
+            .file("a b/y", "22")
+            .file("a/z/w", "333")
+            .file("ab/q", "4444")
+            .file("a.txt", "55555");
+        let r = run(&fs, &opts(false));
+        let names: Vec<_> = r.files[r.range_of(&MemFs::path("a"))]
+            .iter()
+            .map(|f| {
+                f.path
+                    .strip_prefix(&r.root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, vec!["a/x", "a/z/w"]);
+    }
 }
