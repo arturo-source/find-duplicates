@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "find-duplicates"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "dark-light",
  "dirs",
