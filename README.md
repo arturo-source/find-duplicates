@@ -2,7 +2,7 @@
 
 A desktop application to find duplicate files across directories. Built with Rust and [egui](https://github.com/emilk/egui).
 
-![Screenshot](assets/screenshot.webp)
+![Similar folders](assets/similar-folders.webp)
 
 ## How it works
 
@@ -18,6 +18,12 @@ A desktop application to find duplicate files across directories. Built with Rus
 - **Treemap** of the disk coloured by how much of each folder is duplicated
 - Hash cache between scans (in the OS cache dir, e.g. `~/.cache/find-duplicates/hashes.bin`), invalidated by size and modification time
 - Quick scan mode, minimum file size and ignore patterns
+
+## Screenshots
+
+| Duplicate files | Treemap |
+| --- | --- |
+| ![Duplicate files](assets/duplicate-files.webp) | ![Treemap](assets/treemap.webp) |
 
 ## Build
 
